@@ -1,0 +1,6 @@
+*secret*.json
+*client*.json
+token*.json
+*.token
+
+*__pycache__
