@@ -57,4 +57,6 @@ YouTube Data API v3 has a daily default quota of **10,000 units**:
 - **Delete (`playlistItems.delete`)**: 50 units per deleted track.
 - **Reorder (`playlistItems.update`)**: 50 units per moved track.
 
-* Note: I made this project using Google Antigravity, since I basically know nothing about Python. Though, I figured since this is actually useful I'd upload it.
+---
+
+Note: I made this project using Google Antigravity, since I basically know nothing about Python. Though, I figured since this is actually useful I'd upload it.
