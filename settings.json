@@ -1,4 +1,5 @@
 {
+    "safety_check_before_push": true,
     "playlists": {
         "example": "PLc1QVfcSrgx4"
     }

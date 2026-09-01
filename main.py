@@ -43,6 +43,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 def load_settings():
     """Loads settings.json safely, recreating with defaults if missing or corrupted."""
     default_settings = {
+        "safety_check_before_push": True,
         "playlists": {}
     }
     if not os.path.exists(SETTINGS_FILE):
@@ -55,6 +56,7 @@ def load_settings():
             settings = json.load(f)
             if not isinstance(settings, dict):
                 raise ValueError("Settings file must contain a JSON object.")
+            settings.setdefault("safety_check_before_push", True)
             settings.setdefault("playlists", {})
             return settings
     except (json.JSONDecodeError, ValueError, OSError) as e:
@@ -393,10 +395,13 @@ def command_unlink(args, settings):
 def command_list(args, settings):
     """Lists all configured playlist aliases and current settings."""
     playlists = settings.get("playlists", {})
+    safety_check = settings.get("safety_check_before_push", True)
 
     print("\n" + "=" * 50)
     print(" YouTube Playlist Manager - Configuration")
     print("=" * 50)
+    print(f" Safety check before push: {'Enabled (True)' if safety_check else 'Disabled (False)'}")
+    print("-" * 50)
     print(" Configured Aliases:")
 
     if not playlists:
@@ -580,10 +585,11 @@ def command_push(args, settings):
         return
 
     # Safety checks and Pull Reminders
-    confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
-    if confirm != 'y':
-        print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
-        return
+    if settings.get("safety_check_before_push", True):
+        confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
+        if confirm != 'y':
+            print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
+            return
 
     # Parse local text file (supports IDs, URLs, and ID|Title formats)
     print(f"[*] Reading and validating local file '{file_path}'...")
