@@ -5,11 +5,18 @@ import glob
 import re
 import argparse
 import shutil
+import bisect
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
-# Configure safe utf-8 stdout/stderr where possible on Windows
+# Configure safe utf-8 stdout/stderr and ANSI/OSC terminal support on Windows
 if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except Exception:
+        pass
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -392,27 +399,23 @@ def command_unlink(args, settings):
         print(f"[!] Alias '{alias}' not found in settings.")
 
 
-def command_list(args, settings):
-    """Lists all configured playlist aliases and current settings."""
-    playlists = settings.get("playlists", {})
-    safety_check = settings.get("safety_check_before_push", True)
+def terminal_link(text, url):
+    """Formats text as a clickable OSC 8 terminal hyperlink."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
-    print("\n" + "=" * 50)
-    print(" YouTube Playlist Manager - Configuration")
-    print("=" * 50)
-    print(f" Safety check before push: {'Enabled (True)' if safety_check else 'Disabled (False)'}")
-    print("-" * 50)
-    print(" Configured Aliases:")
+
+def command_list(args, settings):
+    """Lists all configured playlist aliases."""
+    playlists = settings.get("playlists", {})
 
     if not playlists:
-        print("  (No aliases linked yet. Use 'python main.py link <alias> <playlist_id>')")
-    else:
-        for alias, pid in playlists.items():
-            local_file = os.path.join(PLAYLISTS_DIR, f"{sanitize_filename(alias)}.txt")
-            status = f"Local file: {local_file}" if os.path.exists(local_file) else "Local file: Not pulled yet"
-            print(f"  * {alias} -> {pid}")
-            print(f"    - {status}")
-    print("=" * 50 + "\n")
+        print("No aliases configured. Use 'python main.py link <alias> <id_or_url>'")
+        return
+
+    print("Configured Aliases:")
+    for alias, pid in playlists.items():
+        url = f"https://www.youtube.com/playlist?list={pid}"
+        print(f"  {alias} -> {terminal_link(pid, url)}")
 
 
 def find_lis_indices(arr):
@@ -420,7 +423,6 @@ def find_lis_indices(arr):
     Computes the set of indices corresponding to a Longest Increasing Subsequence in arr.
     Uses O(N log N) patience sorting with predecessor tracking.
     """
-    import bisect
     n = len(arr)
     if n == 0:
         return set()
@@ -846,59 +848,137 @@ def command_format(args, settings):
     print("=" * 55 + "\n")
 
 
-# --- CLI ENTRY POINT ---
+# --- CLI HELP ---
+
+def print_help():
+    """Prints complete CLI usage and all command descriptions."""
+    help_text = """YouTube Playlist Manager
+A CLI tool to manage, reorder, backup, and synchronize YouTube playlists locally using plain text files.
+
+Usage:
+  python main.py <command> [arguments]
+
+Commands:
+  link    python main.py link <alias> <id_or_url>
+          Connects an alias name to a YouTube Playlist ID.
+
+  unlink  python main.py unlink <alias>
+          Removes a linked playlist alias from settings.
+
+  list    python main.py list
+          Displays all configured aliases.
+
+  pull    python main.py pull <alias>
+          Downloads the live YouTube playlist into playlists/<alias>.txt.
+
+  push    python main.py push <alias>
+          Pushes local .txt additions, deletions, and track order to YouTube and
+          automatically formats URLs/IDs to <video_id> | <video_title> format.
+
+  format  python main.py format <alias>
+          Normalizes URLs/IDs into <video_id> | <title> format for readability.
+
+  help    python main.py help
+          Displays this help message with all command usages.
+
+Options:
+  -h, --help  Print help
+"""
+    print(help_text)
+
+
+# --- ENTRY POINT ---
 
 def main():
     try:
         settings = load_settings()
+
+        # Handle top-level help command before parsing
+        if len(sys.argv) > 1 and sys.argv[1].lower() in ("help", "-h", "--help"):
+            print_help()
+            sys.exit(0)
+
         parser = argparse.ArgumentParser(
             description="YouTube Playlist CLI Manager - Reorder, sync, and manage YouTube playlists using local text files.",
-            formatter_class=argparse.RawDescriptionHelpFormatter
+            add_help=False
         )
-        subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
+        parser.add_argument("-h", "--help", action="store_true")
+        subparsers = parser.add_subparsers(dest="command")
 
         # Command: link
-        link_parser = subparsers.add_parser("link", help="Link a playlist alias to a YouTube Playlist ID or URL")
-        link_parser.add_argument("name", help="Alias name (e.g. 'main', 'chill')")
-        link_parser.add_argument("id", help="YouTube Playlist ID or full YouTube playlist URL")
+        link_parser = subparsers.add_parser("link", add_help=False)
+        link_parser.add_argument("name", nargs="?")
+        link_parser.add_argument("id", nargs="?")
+        link_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: unlink
-        unlink_parser = subparsers.add_parser("unlink", help="Unlink a playlist alias")
-        unlink_parser.add_argument("name", help="Alias name to remove")
+        unlink_parser = subparsers.add_parser("unlink", add_help=False)
+        unlink_parser.add_argument("name", nargs="?")
+        unlink_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: list
-        subparsers.add_parser("list", help="List all linked playlist aliases and configuration")
+        list_parser = subparsers.add_parser("list", add_help=False)
+        list_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: pull
-        pull_parser = subparsers.add_parser("pull", help="Pull remote YouTube playlist to local text file")
-        pull_parser.add_argument("target", help="Playlist alias name or Playlist ID / URL")
+        pull_parser = subparsers.add_parser("pull", add_help=False)
+        pull_parser.add_argument("target", nargs="?")
+        pull_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: push
-        push_parser = subparsers.add_parser("push", help="Push local text file layout to YouTube and normalize file")
-        push_parser.add_argument("target", help="Playlist alias name or Playlist ID / URL")
+        push_parser = subparsers.add_parser("push", add_help=False)
+        push_parser.add_argument("target", nargs="?")
+        push_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: format
-        format_parser = subparsers.add_parser("format", help="Format and normalize local playlist file (convert links to ID | Title)")
-        format_parser.add_argument("target", help="Playlist alias name (file in playlists/ directory)")
+        format_parser = subparsers.add_parser("format", add_help=False)
+        format_parser.add_argument("target", nargs="?")
+        format_parser.add_argument("-h", "--help", action="store_true")
+
+        # Command: help
+        help_parser = subparsers.add_parser("help", add_help=False)
+        help_parser.add_argument("-h", "--help", action="store_true")
 
         args = parser.parse_args()
 
-        if not args.command:
-            parser.print_help()
+        if not args.command or getattr(args, "help", False):
+            print_help()
             sys.exit(0)
 
         if args.command == "link":
+            if not args.name or not args.id:
+                print("[!] Error: Missing arguments. Syntax: python main.py link <alias> <id_or_url>\n")
+                print_help()
+                sys.exit(1)
             command_link(args, settings)
         elif args.command == "unlink":
+            if not args.name:
+                print("[!] Error: Missing alias name. Syntax: python main.py unlink <alias>\n")
+                print_help()
+                sys.exit(1)
             command_unlink(args, settings)
         elif args.command == "list":
             command_list(args, settings)
         elif args.command == "pull":
+            if not args.target:
+                print("[!] Error: Missing target. Syntax: python main.py pull <alias>\n")
+                print_help()
+                sys.exit(1)
             command_pull(args, settings)
         elif args.command == "push":
+            if not args.target:
+                print("[!] Error: Missing target. Syntax: python main.py push <alias>\n")
+                print_help()
+                sys.exit(1)
             command_push(args, settings)
         elif args.command == "format":
+            if not args.target:
+                print("[!] Error: Missing target. Syntax: python main.py format <alias>\n")
+                print_help()
+                sys.exit(1)
             command_format(args, settings)
+        elif args.command == "help":
+            print_help()
 
     except KeyboardInterrupt:
         print("\n\n[!] Operation cancelled by user.")

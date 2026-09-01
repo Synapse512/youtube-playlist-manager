@@ -24,10 +24,11 @@ pip install -r requirements.txt
 | --- | --- | --- |
 | **link** | `python main.py link <alias> <id_or_url>` | Connects a short alias name to a YouTube Playlist ID. |
 | **unlink** | `python main.py unlink <alias>` | Removes a linked playlist alias from settings. |
-| **list** | `python main.py list` | Displays all configured aliases and local file statuses. |
+| **list** | `python main.py list` | Displays all configured aliases. |
 | **pull** | `python main.py pull <alias>` | Downloads the live YouTube playlist into `playlists/<alias>.txt`. |
 | **push** | `python main.py push <alias>` | Pushes local `.txt` additions, deletions, and track order to YouTube and automatically formats URLs/IDs to `<video_id> \| <video_title>` format. |
 | **format** | `python main.py format <alias>` | Normalizes URLs/IDs into `<video_id> \| <title>` format for readability. |
+| **help** | `python main.py help [command]` | Displays help information for all commands or a specific command. |
 
 ### 4. Quota Information
 YouTube Data API v3 has a daily default quota of **10,000 units**, which amounts to about 200 operations of inserting and deleting from a playlist every day.
