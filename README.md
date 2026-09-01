@@ -49,7 +49,7 @@ python main.py format <alias>
 ```
 Normalizes the local text file (converting pasted links/IDs to `<video_id> | <video_title>` and fetching titles) without pushing changes to YouTube.
 
-### 4. Quota Optimization & Tracking
+### 4. Quota Information
 YouTube Data API v3 has a daily default quota of **10,000 units**:
 - **Read / List (`playlistItems.list`)**: 1 unit per 50-track page.
 - **Title Fetch (`videos.list`)**: 1 unit per 50-track batch.
