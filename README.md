@@ -20,42 +20,25 @@ pip install -r requirements.txt
 
 ### 3. Usage
 
-#### Link an Alias:
-```bash
-python main.py link <alias_name> <playlist_id_or_url>
-```
-
-#### List Configured Playlists:
-```bash
-python main.py list
-```
-
-#### Pull Live Playlist to Text File:
-```bash
-python main.py pull <alias_or_id>
-```
-Saves to `playlists/<alias>.txt`.
-
-
-#### Push Local Layout to YouTube:
-```bash
-python main.py push <alias_or_id>
-```
-Synchronizes all insertions, deletions, and reorders with YouTube. Upon completion, it **automatically normalizes the local text file**, replacing any pasted links with `<video_id> | <video_title>`.
-
-#### Format Local File (Optional):
-```bash
-python main.py format <alias>
-```
-Normalizes the local text file (converting pasted links/IDs to `<video_id> | <video_title>` and fetching titles) without pushing changes to YouTube.
+| Command | Syntax | Description |
+| --- | --- | --- |
+| **link** | `python main.py link <alias> <id_or_url>` | Connects a short alias name to a YouTube Playlist ID. |
+| **unlink** | `python main.py unlink <alias>` | Removes a linked playlist alias from settings. |
+| **list** | `python main.py list` | Displays all configured aliases and local file statuses. |
+| **pull** | `python main.py pull <alias>` | Downloads the live YouTube playlist into `playlists/<alias>.txt`. |
+| **push** | `python main.py push <alias>` | Pushes local `.txt` additions, deletions, and track order to YouTube and automatically formats URLs/IDs to `<video_id> \| <video_title>` format. |
+| **format** | `python main.py format <alias>` | Normalizes URLs/IDs into `<video_id> \| <title>` format for readability. |
 
 ### 4. Quota Information
-YouTube Data API v3 has a daily default quota of **10,000 units**:
-- **Read / List (`playlistItems.list`)**: 1 unit per 50-track page.
-- **Title Fetch (`videos.list`)**: 1 unit per 50-track batch.
-- **Insert (`playlistItems.insert`)**: 50 units per added track.
-- **Delete (`playlistItems.delete`)**: 50 units per deleted track.
-- **Reorder (`playlistItems.update`)**: 50 units per moved track.
+YouTube Data API v3 has a daily default quota of **10,000 units**, which amounts to about 200 operations of inserting and deleting from a playlist every day.
+
+| Operation | API Endpoint | Quota Cost |
+| --- | --- | --- |
+| **Read / List** | `playlistItems.list` | **1 unit** per 50-track page |
+| **Title Fetch** | `videos.list` | **1 unit** per 50-track batch |
+| **Insert Track** | `playlistItems.insert` | **50 units** per added video |
+| **Delete Track** | `playlistItems.delete` | **50 units** per removed video |
+| **Reorder Track** | `playlistItems.update` | **50 units** per shifted position |
 
 ---
 

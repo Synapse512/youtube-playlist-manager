@@ -43,7 +43,6 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 def load_settings():
     """Loads settings.json safely, recreating with defaults if missing or corrupted."""
     default_settings = {
-        "auto_pull_before_push": False,
         "playlists": {}
     }
     if not os.path.exists(SETTINGS_FILE):
@@ -56,7 +55,6 @@ def load_settings():
             settings = json.load(f)
             if not isinstance(settings, dict):
                 raise ValueError("Settings file must contain a JSON object.")
-            settings.setdefault("auto_pull_before_push", False)
             settings.setdefault("playlists", {})
             return settings
     except (json.JSONDecodeError, ValueError, OSError) as e:
@@ -395,13 +393,10 @@ def command_unlink(args, settings):
 def command_list(args, settings):
     """Lists all configured playlist aliases and current settings."""
     playlists = settings.get("playlists", {})
-    auto_pull = settings.get("auto_pull_before_push", False)
 
     print("\n" + "=" * 50)
     print(" YouTube Playlist Manager - Configuration")
     print("=" * 50)
-    print(f" Auto-pull before push: {'Enabled (True)' if auto_pull else 'Disabled (False)'}")
-    print("-" * 50)
     print(" Configured Aliases:")
 
     if not playlists:
@@ -585,19 +580,10 @@ def command_push(args, settings):
         return
 
     # Safety checks and Pull Reminders
-    if settings.get("auto_pull_before_push", False):
-        backup_path = f"{file_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
-        try:
-            shutil.copyfile(file_path, backup_path)
-            print(f"[+] Backup created at '{backup_path}'. Auto-pulling fresh data before push...")
-            command_pull(args, settings)
-        except OSError as e:
-            print(f"[!] Warning: Could not create backup file '{backup_path}': {e}")
-    else:
-        confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
-        if confirm != 'y':
-            print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
-            return
+    confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
+    if confirm != 'y':
+        print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
+        return
 
     # Parse local text file (supports IDs, URLs, and ID|Title formats)
     print(f"[*] Reading and validating local file '{file_path}'...")
