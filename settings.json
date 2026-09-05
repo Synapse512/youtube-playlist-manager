@@ -1,6 +1,6 @@
 {
     "safety_check_before_push": true,
-    "playlists": {
-        "example": "PLc1QVfcSrgx4"
-    }
+    "menu_playlist_count": 3,
+    "menu_user_count": 3,
+    "enable_logging": true
 }

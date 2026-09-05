@@ -1,6 +1,31 @@
+# User credentials & secrets
+users/*
+!users/.gitkeep
+
+# OAuth session tokens
+data/tokens/*
+!data/tokens/.gitkeep
+
+# Local playlist data
+data/playlists.json
+!data/.gitkeep
+
+# Local playlist tracklists
+playlists/*
+!playlists/.gitkeep
+
+# Local operation logs
+logs/*
+!logs/.gitkeep
+
+# General secret patterns and tokens
 *secret*.json
 *client*.json
 token*.json
 *.token
 
-*__pycache__
+# Python cache & temporary files
+__pycache__/
+*.py[cod]
+*.bak
+*.tmp

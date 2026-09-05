@@ -14,23 +14,65 @@ pip install -r requirements.txt
 4. Go to **APIs & Services > Credentials**:
    - Click **Create Credentials** -> **OAuth client ID**.
    - Set Application type to **Desktop App**.
-5. Download your credentials JSON file and save it in the project root directory as `client_secret.json`.
+5. Download your credentials JSON file, rename it to `<username>.json`, and place it in the `users/` folder (e.g. `users/alice.json`).
 6. Go to **OAuth consent screen -> Audience -> Test Users**
-   - Add your google email tied to the account with the playlists you want
+   - Add the Google account email tied to the playlists you want to manage
 
-### 3. Usage
+### 3. Multiple Accounts
+
+The tool supports any number of Google accounts simultaneously. Each account gets its own credential file in `users/` and its OAuth session token is cached separately in `data/tokens/`.
+
+**Directory layout:**
+```
+youtube-playlist-manager/
+├── users/
+│   ├── john.json        ← renamed client_secret files (one per account)
+│   └── dalton.json
+├── data/
+│   ├── tokens/
+│   │   ├── john.json    ← cached OAuth tokens (auto-generated, never edit)
+│   │   └── dalton.json
+│   └── playlists.json   ← linked playlists and activity history
+├── playlists/
+│   ├── chill.txt        ← tracklist with user name header
+│   └── instrumental.txt
+├── settings.json        ← user configuration preferences
+└── logs/
+    ├── chill.log        ← track changelog and operation history
+    └── instrumental.log
+```
+
+**How accounts are automatically used**
+The account a playlist is tied to is found through the `# user: <username>` header at the top of the playlist `.txt` file:
+- If you only have **one user**, it is auto-selected when linking without needing `--user`.
+- If you have **multiple users** and omit `--user` when linking, the CLI interactively prompts you to choose which account the playlist is connected to.
+
+The `# user:` header is written automatically when you `link` or `pull` a playlist - you don't need to add it manually.
+
+After linking, all `pull`, `push`, and `format` operations on that playlist will automatically use the correct account without needing `--user` again.
+
+### 4. Usage
 
 | Command | Syntax | Description |
 | --- | --- | --- |
-| **link** | `python main.py link <alias> <id_or_url>` | Connects a short alias name to a YouTube Playlist ID. |
-| **unlink** | `python main.py unlink <alias>` | Removes a linked playlist alias from settings. |
-| **list** | `python main.py list` | Displays all configured aliases. |
-| **pull** | `python main.py pull <alias>` | Downloads the live YouTube playlist into `playlists/<alias>.txt`. |
-| **push** | `python main.py push <alias>` | Pushes local `.txt` additions, deletions, and track order to YouTube and automatically formats URLs/IDs to `<video_id> \| <video_title>` format. |
-| **format** | `python main.py format <alias>` | Normalizes URLs/IDs into `<video_id> \| <title>` format for readability. |
-| **help** | `python main.py help [command]` | Displays help information for all commands or a specific command. |
+| **menu** | `python main.py` | Opens menu to show a quick glance at recently edited playlists and command usage |
+| **link** | `python main.py link <id_or_url> [--user <username>]` | Connects a YouTube Playlist ID or URL using the title fetched from YouTube |
+| **unlink** | `python main.py unlink <name>` | Removes a linked playlist. |
+| **list** | `python main.py list` | Displays all configured playlists, associated accounts, and last CLI edit timestamp/command. |
+| **pull** | `python main.py pull <name> [--user <username>]` | Downloads the live YouTube playlist into `playlists/<name>.txt`. |
+| **push** | `python main.py push <name> [--user <username>]` | Pushes local `.txt` additions, deletions, and track order to YouTube and automatically formats URLs/IDs to `<video_id> \| <video_title>` format. |
+| **format** | `python main.py format <name> [--user <username>]` | Normalizes URLs/IDs into `<video_id> \| <title>` format for readability. |
+| **help** | `python main.py help` | Displays help information with all command usages. |
 
-### 4. Quota Information
+### 5. Configuration (`settings.json`)
+
+You can edit `settings.json` directly in any text editor to configure defaults:
+- `"safety_check_before_push"`: `true` / `false` — Prompts for confirmation before pushing to YouTube to prevent overwriting recent changes.
+- `"menu_playlist_count"`: `<number>` / `"all"` — How many recent playlists to show in the menu, or `"all"` to list all.
+- `"menu_user_count"`: `<number>` / `"all"` — How many user accounts to show in the menu, or `"all"` to list all.
+- `"enable_logging"`: `true` / `false` — Records per-playlist operation history in `logs/<name>.log` tracking additions, removals, and changes.
+
+### 6. Quota Information
 YouTube Data API v3 has a daily default quota of **10,000 units**, which amounts to about 200 operations of inserting and deleting from a playlist every day.
 
 | Operation | API Endpoint | Quota Cost |
