@@ -42,7 +42,7 @@ youtube-playlist-manager/
     └── instrumental.log
 ```
 
-**How accounts are automatically used**
+**How accounts are automatically used**   
 The account a playlist is tied to is found through the `# user: <username>` header at the top of the playlist `.txt` file:
 - If you only have **one user**, it is auto-selected when linking without needing `--user`.
 - If you have **multiple users** and omit `--user` when linking, the CLI interactively prompts you to choose which account the playlist is connected to.
