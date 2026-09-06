@@ -101,7 +101,7 @@ def resolve_user(username=None, allow_prompt=False):
 
     print(f"\n[!] Error: Multiple user accounts found but no user specified.")
     print(f"    Available users: {', '.join(users)}")
-    print(f"    Use --user <username>, or add '# user: <name>' to your playlist file.")
+    print(f"    Use --user <username>, or link the playlist so data/playlists.json records its account.")
     sys.exit(1)
 
 

@@ -9,7 +9,6 @@ import argparse
 from core.config import (
     load_settings,
     load_playlist_data,
-    check_tokens_migration,
 )
 from core.ui import show_menu, print_help, dispatch_command
 
@@ -17,8 +16,7 @@ from core.ui import show_menu, print_help, dispatch_command
 def main():
     try:
         settings = load_settings()
-        playlist_data = load_playlist_data(settings)
-        check_tokens_migration()
+        playlist_data = load_playlist_data()
 
         # Handle top-level help command before parsing
         if len(sys.argv) > 1 and sys.argv[1].lower() in ("help", "-h", "--help"):

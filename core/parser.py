@@ -124,14 +124,13 @@ def parse_playlist_file(file_path):
       - '<video_id>'
       - '<video_url>'
     Recognizes directive comments:
-      - '# user: <username>'  — specifies which account credentials to use
+      - '# user: <username>'  — records the linked account as a readable file hint
     Ignores empty lines and all other comments (lines starting with '#').
-    Returns (target_video_ids, target_video_titles, skipped_lines, file_user).
+    Returns (target_video_ids, target_video_titles, skipped_lines).
     """
     target_video_ids = []
     target_video_titles = {}
     skipped_lines = 0
-    file_user = None
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -141,7 +140,6 @@ def parse_playlist_file(file_path):
 
             # Detect special directive comments
             if line.lower().startswith("# user:"):
-                file_user = line[7:].strip()
                 continue
 
             if line.startswith("#"):
@@ -164,7 +162,7 @@ def parse_playlist_file(file_path):
                 print(f"    [!] Line {line_num}: Skipping unparseable video ID or URL: '{id_candidate}'")
                 skipped_lines += 1
 
-    return target_video_ids, target_video_titles, skipped_lines, file_user
+    return target_video_ids, target_video_titles, skipped_lines
 
 
 def save_playlist_file(file_path, video_ids, video_titles, username=None):
@@ -196,19 +194,3 @@ def save_playlist_file(file_path, video_ids, video_titles, username=None):
     except OSError as e:
         print(f"[!] Error saving normalized playlist to '{file_path}': {e}")
         return False
-
-
-def read_playlist_user(file_path):
-    """Reads only the '# user:' directive from a playlist file without full parsing."""
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.lower().startswith("# user:"):
-                    return line[7:].strip()
-                # Stop early once we reach actual video data
-                if line and not line.startswith("#"):
-                    break
-    except OSError:
-        pass
-    return None

@@ -2,7 +2,11 @@
 
 A CLI tool to manage, reorder, backup, and synchronize YouTube playlists locally using plain text files.
 
-### 1. Installation
+### 1. Installation  
+install Python 3.6+ (tested on 3.14.2)
+```bash
+git clone https://github.com/Synapse512/youtube-playlist-manager
+```
 ```bash
 pip install -r requirements.txt
 ```
@@ -22,42 +26,40 @@ pip install -r requirements.txt
 
 The tool supports any number of Google accounts simultaneously. Each account gets its own credential file in `users/` and its OAuth session token is cached separately in `data/tokens/`.
 
-**Directory layout:**
-```
-youtube-playlist-manager/
-├── main.py              ← CLI entry point launcher
-├── core/                ← Modular application logic
-│   ├── config.py        ← Settings & data persistence
-│   ├── auth.py          ← OAuth credentials & account switching
-│   ├── parser.py        ← URL/ID regex & playlist file I/O
-│   ├── sync.py          ← LIS minimal-moves reordering engine
-│   ├── commands.py      ← Command handlers (pull, push, etc.)
-│   └── ui.py            ← Dashboard menu & terminal formatting
-├── users/
-│   ├── john.json        ← renamed client_secret files (one per account)
-│   └── dalton.json
-├── data/
-│   ├── tokens/
-│   │   ├── john.json    ← cached OAuth tokens (auto-generated, never edit)
-│   │   └── dalton.json
-│   └── playlists.json   ← linked playlists and activity history
-├── playlists/
-│   ├── chill.txt        ← tracklist with user name header
-│   └── instrumental.txt
-├── settings.json        ← user configuration preferences
-└── logs/
-    ├── chill.log        ← track changelog and operation history
-    └── instrumental.log
-```
-
 **How accounts are automatically used**   
-The account a playlist is tied to is found through the `# user: <username>` header at the top of the playlist `.txt` file:
+The account a playlist is tied to is stored in `data/playlists.json` when you `link` a playlist:
 - If you only have **one user**, it is auto-selected when linking without needing `--user`.
 - If you have **multiple users** and omit `--user` when linking, the CLI interactively prompts you to choose which account the playlist is connected to.
 
-The `# user:` header is written automatically when you `link` or `pull` a playlist - you don't need to add it manually.
+After linking, all `pull`, `push`, and `format` operations on that playlist will automatically use the correct account without needing `--user` param or prompting you to specify the user.
 
-After linking, all `pull`, `push`, and `format` operations on that playlist will automatically use the correct account without needing `--user` again.
+**Directory layout:**
+```
+youtube-playlist-manager/
+├── main.py              <- CLI entry point
+├── core/                <- Modular application logic
+│   ├── config.py        <- Settings & data persistence
+│   ├── auth.py          <- OAuth credentials & account switching
+│   ├── parser.py        <- URL/ID regex & playlist file I/O
+│   ├── sync.py          <- LIS minimal-moves reordering engine
+│   ├── commands.py      <- Command handlers (pull, push, etc.)
+│   └── ui.py            <- Dashboard menu & terminal formatting
+├── users/
+│   ├── john.json        <- renamed client_secret files (one per account)
+│   └── dalton.json
+├── data/
+│   ├── tokens/
+│   │   ├── john.json    <- cached OAuth tokens (auto-generated, never edit)
+│   │   └── dalton.json
+│   └── playlists.json   <- linked playlists, account ownership, and activity history
+├── playlists/
+│   ├── chill.txt        <- tracklist with user name header
+│   └── instrumental.txt
+├── settings.json        <- user configuration preferences
+└── logs/
+    ├── chill.log        <- track changelog and operation history
+    └── instrumental.log
+```
 
 ### 4. Usage
 
@@ -81,7 +83,7 @@ You can edit `settings.json` directly in any text editor to configure defaults:
 - `"enable_logging"`: `true` / `false` — Records per-playlist operation history in `logs/<name>.log` tracking additions, removals, and changes.
 
 ### 6. Quota Information
-YouTube Data API v3 has a daily default quota of **10,000 units**, which amounts to about 200 operations of inserting and deleting from a playlist every day.
+YouTube Data API v3 has a daily default quota of **10,000 units**, which amounts to about 200 operations of inserting and deleting from a playlist every day. For more information go to [here](https://developers.google.com/youtube/v3/determine_quota_cost)
 
 | Operation | API Endpoint | Quota Cost |
 | --- | --- | --- |

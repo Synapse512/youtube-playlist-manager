@@ -7,7 +7,7 @@ import json
 import shutil
 from datetime import datetime
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 SETTINGS_FILE = "settings.json"
 DATA_DIR = "data"
@@ -40,13 +40,6 @@ def load_settings():
                 raise ValueError("Settings file must contain a JSON object.")
             settings.setdefault("safety_check_before_push", True)
             settings.setdefault("menu_playlist_count", 3)
-            # Support migration from legacy show_accounts_in_menu
-            if "menu_user_count" not in settings and "menu_account_count" not in settings:
-                legacy_val = settings.get("show_accounts_in_menu")
-                if legacy_val is False:
-                    settings["menu_user_count"] = 0
-                else:
-                    settings["menu_user_count"] = 3
             settings.setdefault("menu_user_count", 3)
             settings.setdefault("enable_logging", True)
             return settings
@@ -64,11 +57,10 @@ def load_settings():
 
 def save_settings(settings):
     """Saves settings dictionary to settings.json atomically."""
-    clean_settings = {k: v for k, v in settings.items() if k not in ("playlists", "activity")}
     temp_file = f"{SETTINGS_FILE}.tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(clean_settings, f, indent=4)
+            json.dump(settings, f, indent=4)
         if os.path.exists(SETTINGS_FILE):
             os.replace(temp_file, SETTINGS_FILE)
         else:
@@ -77,31 +69,16 @@ def save_settings(settings):
         print(f"[!] Error saving settings to '{SETTINGS_FILE}': {e}")
 
 
-def load_playlist_data(settings=None):
-    """Loads data/playlists.json containing linked playlists and activity tracking, migrating from settings.json if needed."""
+def load_playlist_data():
+    """Loads data/playlists.json containing linked playlists, account ownership, and activity tracking."""
     os.makedirs(DATA_DIR, exist_ok=True)
     default_data = {
         "playlists": {},
+        "playlist_users": {},
         "activity": {}
     }
 
-    # Auto-migration: if settings has legacy 'playlists' or 'activity', transfer them
-    migrated = False
-    legacy_playlists = {}
-    legacy_activity = {}
-    if settings is not None:
-        if "playlists" in settings:
-            legacy_playlists = settings.pop("playlists")
-            migrated = True
-        if "activity" in settings:
-            legacy_activity = settings.pop("activity")
-            migrated = True
-        if migrated:
-            save_settings(settings)
-
     if not os.path.exists(PLAYLISTS_DATA_FILE):
-        default_data["playlists"].update(legacy_playlists)
-        default_data["activity"].update(legacy_activity)
         save_playlist_data(default_data)
         return default_data
 
@@ -110,13 +87,11 @@ def load_playlist_data(settings=None):
             data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("Playlist data file must contain a JSON object.")
+            should_save = any(k not in data for k in default_data)
             data.setdefault("playlists", {})
+            data.setdefault("playlist_users", {})
             data.setdefault("activity", {})
-            if migrated:
-                for k, v in legacy_playlists.items():
-                    data["playlists"].setdefault(k, v)
-                for k, v in legacy_activity.items():
-                    data["activity"].setdefault(k, v)
+            if should_save:
                 save_playlist_data(data)
             return data
     except (json.JSONDecodeError, ValueError, OSError) as e:
@@ -146,20 +121,31 @@ def save_playlist_data(data):
         print(f"[!] Error saving playlist data to '{PLAYLISTS_DATA_FILE}': {e}")
 
 
-def check_tokens_migration():
-    """Migrates cached OAuth tokens from legacy 'tokens/' directory to 'data/tokens/'."""
-    old_tokens_dir = "tokens"
-    if os.path.isdir(old_tokens_dir) and os.path.abspath(old_tokens_dir) != os.path.abspath(TOKENS_DIR):
-        os.makedirs(TOKENS_DIR, exist_ok=True)
-        for fname in os.listdir(old_tokens_dir):
-            if fname.endswith(".json") and not fname.startswith("."):
-                old_path = os.path.join(old_tokens_dir, fname)
-                new_path = os.path.join(TOKENS_DIR, fname)
-                if not os.path.exists(new_path):
-                    try:
-                        shutil.move(old_path, new_path)
-                    except OSError:
-                        pass
+def get_playlist_user(playlist_data, target):
+    """Returns the authoritative username for a linked playlist from data/playlists.json."""
+    from .parser import get_playlist_name_for_target
+
+    if playlist_data is None:
+        playlist_data = load_playlist_data()
+    playlist_name = get_playlist_name_for_target(target, playlist_data)
+    if not playlist_name or playlist_name not in playlist_data.get("playlists", {}):
+        return None
+    return playlist_data.get("playlist_users", {}).get(playlist_name)
+
+
+def set_playlist_user(playlist_data, target, username):
+    """Stores the authoritative username for a linked playlist in data/playlists.json."""
+    from .parser import get_playlist_name_for_target
+
+    if not username:
+        return
+    if playlist_data is None:
+        playlist_data = load_playlist_data()
+    playlist_name = get_playlist_name_for_target(target, playlist_data)
+    if not playlist_name or playlist_name not in playlist_data.get("playlists", {}):
+        return
+    playlist_data.setdefault("playlist_users", {})[playlist_name] = username
+    save_playlist_data(playlist_data)
 
 
 def record_activity(playlist_data, target, command_name):

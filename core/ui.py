@@ -2,12 +2,10 @@
 Terminal UI, dashboard menu, interactive account display, and help output.
 """
 
-import os
 import sys
 
-from .config import VERSION, PLAYLISTS_DIR
+from .config import VERSION, get_playlist_user
 from .auth import get_users
-from .parser import sanitize_filename, read_playlist_user
 
 
 def terminal_link(text, url):
@@ -55,10 +53,8 @@ def show_menu(settings, playlist_data, parser=None):
             for idx, p_name in enumerate(recent_playlists, 1):
                 pid = playlists[p_name]
                 url = f"https://www.youtube.com/playlist?list={pid}"
-                safe_name = sanitize_filename(p_name)
-                file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
-                file_user = read_playlist_user(file_path) if os.path.exists(file_path) else None
-                user_tag = f"  [{file_user}]" if file_user else ""
+                user = get_playlist_user(playlist_data, p_name)
+                user_tag = f"  [{user}]" if user else ""
 
                 act = activity.get(p_name, {})
                 last_cmd = act.get("last_command")
@@ -72,7 +68,7 @@ def show_menu(settings, playlist_data, parser=None):
                 print(f"       • most recent edit: {last_edit_str}")
                 print()
 
-    raw_user_limit = settings.get("menu_user_count", settings.get("menu_account_count", settings.get("show_accounts_in_menu", 3)))
+    raw_user_limit = settings.get("menu_user_count", 3)
 
     if raw_user_limit is False or str(raw_user_limit).strip().lower() in ("false", "no"):
         user_limit = 0
@@ -127,7 +123,8 @@ Multi-Account Setup:
   Place each user's OAuth client secret JSON in the 'users/' folder, renamed to '<username>.json'.
   Example: users/dalton.json, users/john.json
   Cached session tokens are stored automatically in 'data/tokens/<username>.json'.
-  Playlist files record their account with a '# user: <username>' header line.
+  Playlist account ownership is stored in data/playlists.json.
+  Playlist files also keep a '# user: <username>' header as a readable hint.
 
 Configuration (settings.json):
   Edit 'settings.json' in any text editor to customize tool behavior:
@@ -146,7 +143,8 @@ Commands:
 
   link    python main.py link <id_or_url> [--user <username>]
           Connects a YouTube Playlist ID or URL using the title fetched from YouTube.
-          Creates a playlist file with '# user: <username>' header (prompts to choose account
+          Stores the playlist account in data/playlists.json and creates a playlist file
+          with a '# user: <username>' header (prompts to choose account
           if multiple exist and --user is omitted).
 
   unlink  python main.py unlink <name>
@@ -157,16 +155,16 @@ Commands:
 
   pull    python main.py pull <name> [--user <username>]
           Downloads the live YouTube playlist into playlists/<name>.txt.
-          User is read from the file's '# user:' header if not specified.
+          User is read from data/playlists.json if not specified.
 
   push    python main.py push <name> [--user <username>]
           Pushes local .txt additions, deletions, and track order to YouTube and
           automatically formats URLs/IDs to <video_id> | <video_title> format.
-          User is read from the file's '# user:' header if not specified.
+          User is read from data/playlists.json if not specified.
 
   format  python main.py format <name> [--user <username>]
           Normalizes URLs/IDs into <video_id> | <title> format for readability.
-          User is read from the file's '# user:' header if not specified.
+          User is read from data/playlists.json if not specified.
 
   help    python main.py help
           Displays this help message with all command usages.

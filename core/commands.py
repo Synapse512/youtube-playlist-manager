@@ -14,17 +14,32 @@ from .config import (
     save_playlist_data,
     record_activity,
     log_playlist_event,
+    get_playlist_user,
+    set_playlist_user,
 )
 from .auth import resolve_user, get_youtube_service
 from .parser import (
     extract_playlist_id,
     sanitize_filename,
     resolve_playlist_id,
+    get_playlist_name_for_target,
     parse_playlist_file,
     save_playlist_file,
-    read_playlist_user,
 )
 from .sync import compute_minimal_moves
+
+
+def _resolve_command_user(args, playlist_data, playlist_name):
+    """Resolves the account for playlist operations from args or data/playlists.json."""
+    explicit_user = getattr(args, "user", None)
+    data_user = get_playlist_user(playlist_data, playlist_name)
+
+    username = resolve_user(explicit_user or data_user, allow_prompt=True)
+
+    if explicit_user or not data_user:
+        set_playlist_user(playlist_data, playlist_name, username)
+
+    return username
 
 
 def command_link(args, settings, playlist_data):
@@ -75,6 +90,8 @@ def command_link(args, settings, playlist_data):
         playlists[playlist_name] = playlist_id
         save_playlist_data(playlist_data)
 
+    set_playlist_user(playlist_data, playlist_name, username)
+
     # Create initial playlist file with user header and reminder
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{playlist_name}.txt")
@@ -117,6 +134,9 @@ def command_unlink(args, settings, playlist_data):
         activity = playlist_data.get("activity", {})
         if target_name in activity:
             del activity[target_name]
+        playlist_users = playlist_data.get("playlist_users", {})
+        if target_name in playlist_users:
+            del playlist_users[target_name]
         save_playlist_data(playlist_data)
         print(f"[+] Unlinked playlist '{target_name}'.")
         log_playlist_event(
@@ -145,10 +165,8 @@ def command_list(args, settings, playlist_data):
     print("Configured Playlists:")
     for name, pid in playlists.items():
         url = f"https://www.youtube.com/playlist?list={pid}"
-        safe_name = sanitize_filename(name)
-        file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
-        file_user = read_playlist_user(file_path) if os.path.exists(file_path) else None
-        user_tag = f"  [{file_user}]" if file_user else ""
+        user = get_playlist_user(playlist_data, name)
+        user_tag = f"  [{user}]" if user else ""
 
         act = activity.get(name, {})
         last_cmd = act.get("last_command")
@@ -165,14 +183,14 @@ def command_pull(args, settings, playlist_data):
     """Pulls a remote YouTube playlist into a local text file."""
     target_name = args.target.strip()
     playlist_id = resolve_playlist_id(target_name, playlist_data)
-    safe_name = sanitize_filename(target_name)
+    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
+    safe_name = sanitize_filename(playlist_name)
 
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
-    # Resolve user: explicit --user flag > # user: header in existing file > auto-detect / interactive prompt
-    file_user = read_playlist_user(file_path) if os.path.exists(file_path) else None
-    username = resolve_user(getattr(args, "user", None) or file_user, allow_prompt=True)
+    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
+    username = _resolve_command_user(args, playlist_data, playlist_name)
 
     if playlist_id != target_name:
         print(f"[*] Target playlist '{target_name}' resolved to Playlist ID: {playlist_id}")
@@ -241,10 +259,10 @@ def command_pull(args, settings, playlist_data):
     print(f"  * API Quota Used:  {quota_units:4d} unit(s) (1 unit/page)")
     print("=" * 55)
     print(f"[+] Successfully pulled {len(raw_items)} tracks to '{file_path}'!\n")
-    record_activity(playlist_data, target_name, "pull")
+    record_activity(playlist_data, playlist_name, "pull")
     log_playlist_event(
         settings,
-        target_name,
+        playlist_name,
         "pull",
         username,
         summary_lines=[
@@ -258,7 +276,8 @@ def command_push(args, settings, playlist_data):
     """Pushes the local text file track order and changes to YouTube, then normalizes the local file."""
     target_name = args.target.strip()
     playlist_id = resolve_playlist_id(target_name, playlist_data)
-    safe_name = sanitize_filename(target_name)
+    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
+    safe_name = sanitize_filename(playlist_name)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
     if not os.path.exists(file_path):
@@ -275,7 +294,7 @@ def command_push(args, settings, playlist_data):
 
     # Parse local text file (supports IDs, URLs, and ID|Title formats)
     print(f"[*] Reading and validating local file '{file_path}'...")
-    target_video_ids, target_video_titles, skipped, file_user = parse_playlist_file(file_path)
+    target_video_ids, target_video_titles, skipped = parse_playlist_file(file_path)
 
     if not target_video_ids:
         print("[!] Error: No valid video IDs or URLs found in the local text file. Push aborted.")
@@ -283,8 +302,8 @@ def command_push(args, settings, playlist_data):
 
     print(f"[+] Parsed {len(target_video_ids)} valid tracks from local file.")
 
-    # Resolve user: explicit --user flag > # user: header in file > auto-detect / interactive prompt
-    username = resolve_user(getattr(args, "user", None) or file_user, allow_prompt=True)
+    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
+    username = _resolve_command_user(args, playlist_data, playlist_name)
 
     youtube = get_youtube_service(username)
     print(f"[*] Fetching current live playlist from YouTube ({playlist_id})...")
@@ -337,6 +356,7 @@ def command_push(args, settings, playlist_data):
     deleted_details = []
     inserted_details = []
     moved_details = []
+    sync_failed = False
     curr_counts = {}
     for item in current_list:
         v = item["videoId"]
@@ -358,6 +378,7 @@ def command_push(args, settings, playlist_data):
                 curr_counts[vid] -= 1
             except HttpError as e:
                 print(f"[!] Error deleting track {vid}: {e}")
+                sync_failed = True
 
     # 2. Add new tracks present locally at their exact target positions
     inserted_count = 0
@@ -400,8 +421,14 @@ def command_push(args, settings, playlist_data):
                 if "quotaExceeded" in str(e):
                     print("\n[!] YouTube API daily quota limit reached (~200 updates/day).")
                     print("Run this script again tomorrow to continue!")
-                    break
+                    return
                 print(f"    [!] Error inserting {vid_id}: {e}")
+                sync_failed = True
+
+    if sync_failed:
+        print("\n[!] Push stopped before reordering because one or more delete/insert operations failed.")
+        print("    Pull the playlist again before retrying so the local file reflects YouTube's current state.")
+        return
 
     # 3. Reorder tracks using LIS minimal moves algorithm to minimize quota units
     # Map target video IDs to specific playlistItemIds in current_list
@@ -448,7 +475,7 @@ def command_push(args, settings, playlist_data):
             if "quotaExceeded" in str(e):
                 print("\n[!] YouTube API daily quota limit reached")
                 print("Wait for your quota to reset before running again")
-                break
+                return
             print(f"[!] Error moving track {vid_id}: {e}")
 
     # 4. Normalize and update local text file (<video_id> | <video_title>)
@@ -482,14 +509,14 @@ def command_push(args, settings, playlist_data):
     print(f"  * Reordered:   {moved_count:4d} track(s)     ({update_quota:5d} quota units)")
     print(f"  * Read/List:   {list_units:4d} request(s)   ({list_quota:5d} quota units)")
     print("-" * 58)
-    print(f"  * Total Quota Used: {total_quota:5d} units (Daily limit: ~10,000)")
+    print(f"  * Total Quota Used: {total_quota:5d} units")
     print("=" * 58)
     print("[+] Playlist synchronization complete!\n")
-    record_activity(playlist_data, target_name, "push")
+    record_activity(playlist_data, playlist_name, "push")
     diff_details = deleted_details + inserted_details + moved_details
     log_playlist_event(
         settings,
-        target_name,
+        playlist_name,
         "push",
         username,
         summary_lines=[
@@ -503,7 +530,8 @@ def command_push(args, settings, playlist_data):
 def command_format(args, settings, playlist_data):
     """Formats and cleans a local playlist file, converting any URLs/raw IDs to '<video_id> | <title>'."""
     target_name = args.target.strip()
-    safe_name = sanitize_filename(target_name)
+    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
+    safe_name = sanitize_filename(playlist_name)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
     if not os.path.exists(file_path):
@@ -511,14 +539,14 @@ def command_format(args, settings, playlist_data):
         return
 
     print(f"[*] Reading and formatting '{file_path}'...")
-    target_video_ids, target_video_titles, _, file_user = parse_playlist_file(file_path)
+    target_video_ids, target_video_titles, _ = parse_playlist_file(file_path)
 
     if not target_video_ids:
         print("[!] Error: No valid video IDs or URLs found in the file.")
         return
 
-    # Resolve user: explicit --user flag > # user: header in file > auto-detect / interactive prompt
-    username = resolve_user(getattr(args, "user", None) or file_user, allow_prompt=True)
+    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
+    username = _resolve_command_user(args, playlist_data, playlist_name)
 
     # Check for missing titles and fetch them from YouTube API in batches of 50
     missing_ids = [v for v in target_video_ids if not target_video_titles.get(v)]
@@ -554,10 +582,10 @@ def command_format(args, settings, playlist_data):
     print(f"  * Titles Fetched:    {len(missing_ids):4d}")
     print(f"  * API Quota Used:    {quota_units:4d} unit(s) (1 unit/batch of 50)")
     print("=" * 55 + "\n")
-    record_activity(playlist_data, target_name, "format")
+    record_activity(playlist_data, playlist_name, "format")
     log_playlist_event(
         settings,
-        target_name,
+        playlist_name,
         "format",
         username,
         summary_lines=[
