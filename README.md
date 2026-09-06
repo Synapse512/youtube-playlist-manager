@@ -2,11 +2,22 @@
 
 A CLI tool to manage, reorder, backup, and synchronize YouTube playlists locally using plain text files.
 
-### 1. Installation  
-install Python 3.6+ (tested on 3.14.2)
+### 1. Installation
+
+#### Requirements
+
+* **Python 3.6+**
+* Tested with **Python 3.14.2**
+
+#### Clone the repository
+
 ```bash
 git clone https://github.com/Synapse512/youtube-playlist-manager
+cd youtube-playlist-manager
 ```
+
+#### Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
