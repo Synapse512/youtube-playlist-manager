@@ -25,6 +25,14 @@ The tool supports any number of Google accounts simultaneously. Each account get
 **Directory layout:**
 ```
 youtube-playlist-manager/
+├── main.py              ← CLI entry point launcher
+├── core/                ← Modular application logic
+│   ├── config.py        ← Settings & data persistence
+│   ├── auth.py          ← OAuth credentials & account switching
+│   ├── parser.py        ← URL/ID regex & playlist file I/O
+│   ├── sync.py          ← LIS minimal-moves reordering engine
+│   ├── commands.py      ← Command handlers (pull, push, etc.)
+│   └── ui.py            ← Dashboard menu & terminal formatting
 ├── users/
 │   ├── john.json        ← renamed client_secret files (one per account)
 │   └── dalton.json
