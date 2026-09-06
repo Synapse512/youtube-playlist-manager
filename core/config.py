@@ -7,13 +7,12 @@ import json
 import shutil
 from datetime import datetime
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 SETTINGS_FILE = "settings.json"
 DATA_DIR = "data"
 PLAYLISTS_DATA_FILE = os.path.join(DATA_DIR, "playlists.json")
-USERS_DIR = "users"
-TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
+OAUTH_CLIENTS_DIR = "oauth-clients"
 PLAYLISTS_DIR = "playlists"
 LOGS_DIR = "logs"
 
@@ -25,7 +24,7 @@ def load_settings():
     default_settings = {
         "safety_check_before_push": True,
         "menu_playlist_count": 3,
-        "menu_user_count": 3,
+        "menu_client_count": 3,
         "enable_logging": True
     }
     if not os.path.exists(SETTINGS_FILE):
@@ -40,7 +39,7 @@ def load_settings():
                 raise ValueError("Settings file must contain a JSON object.")
             settings.setdefault("safety_check_before_push", True)
             settings.setdefault("menu_playlist_count", 3)
-            settings.setdefault("menu_user_count", 3)
+            settings.setdefault("menu_client_count", 3)
             settings.setdefault("enable_logging", True)
             return settings
     except (json.JSONDecodeError, ValueError, OSError) as e:
@@ -70,11 +69,10 @@ def save_settings(settings):
 
 
 def load_playlist_data():
-    """Loads data/playlists.json containing linked playlists, account ownership, and activity tracking."""
+    """Loads data/playlists.json containing linked playlists and activity tracking."""
     os.makedirs(DATA_DIR, exist_ok=True)
     default_data = {
         "playlists": {},
-        "playlist_users": {},
         "activity": {}
     }
 
@@ -87,9 +85,12 @@ def load_playlist_data():
             data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("Playlist data file must contain a JSON object.")
+            # Drop the legacy per-playlist account association; oauth clients are
+            # no longer tied to a specific playlist.
+            if "playlist_users" in data:
+                del data["playlist_users"]
             should_save = any(k not in data for k in default_data)
             data.setdefault("playlists", {})
-            data.setdefault("playlist_users", {})
             data.setdefault("activity", {})
             if should_save:
                 save_playlist_data(data)
@@ -121,33 +122,6 @@ def save_playlist_data(data):
         print(f"[!] Error saving playlist data to '{PLAYLISTS_DATA_FILE}': {e}")
 
 
-def get_playlist_user(playlist_data, target):
-    """Returns the authoritative username for a linked playlist from data/playlists.json."""
-    from .parser import get_playlist_name_for_target
-
-    if playlist_data is None:
-        playlist_data = load_playlist_data()
-    playlist_name = get_playlist_name_for_target(target, playlist_data)
-    if not playlist_name or playlist_name not in playlist_data.get("playlists", {}):
-        return None
-    return playlist_data.get("playlist_users", {}).get(playlist_name)
-
-
-def set_playlist_user(playlist_data, target, username):
-    """Stores the authoritative username for a linked playlist in data/playlists.json."""
-    from .parser import get_playlist_name_for_target
-
-    if not username:
-        return
-    if playlist_data is None:
-        playlist_data = load_playlist_data()
-    playlist_name = get_playlist_name_for_target(target, playlist_data)
-    if not playlist_name or playlist_name not in playlist_data.get("playlists", {}):
-        return
-    playlist_data.setdefault("playlist_users", {})[playlist_name] = username
-    save_playlist_data(playlist_data)
-
-
 def record_activity(playlist_data, target, command_name):
     """Records CLI activity (last command, timestamp, interaction count) for a playlist."""
     from .parser import get_playlist_name_for_target
@@ -169,7 +143,7 @@ def record_activity(playlist_data, target, command_name):
     save_playlist_data(playlist_data)
 
 
-def log_playlist_event(settings, target, operation, user, summary_lines=None, detail_lines=None, playlist_data=None):
+def log_playlist_event(settings, target, operation, oauth_client, summary_lines=None, detail_lines=None, playlist_data=None):
     """Appends a structured log entry to logs/<name>.log if logging is enabled."""
     from .parser import get_playlist_name_for_target, sanitize_filename
 
@@ -184,7 +158,7 @@ def log_playlist_event(settings, target, operation, user, summary_lines=None, de
     log_path = os.path.join(LOGS_DIR, f"{safe_name}.log")
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    header = f"=== [{timestamp}] {operation.upper()} (user: {user or 'unknown'}) ==="
+    header = f"=== [{timestamp}] {operation.upper()} (oauth client: {oauth_client or 'unknown'}) ==="
 
     lines = [header]
     if summary_lines:

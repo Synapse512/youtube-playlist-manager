@@ -1,0 +1,16 @@
+instead of having it so each oauth json file is a "user", treat it as just a temporary quota for a project
+for every single project you can make multiple oauth json files but they all share the same quota
+
+new workflow (potentially):
+user wants to sync changes with playlist.txt to the online one (already known from linking stage)
+they do py main.py push playlist, it opens web browser to let them select the google account
+
+there are no more tokens 9r username recording which user the json file SHOULD connect to, from now on they pick
+this way, if they wanna use some of that projects quota for one account or another account they can
+
+once the quota of the first json file runs out, they should be able to run push again but using the json connected to another project, with new quota
+so this means that for each pull, each push, pretty much every operation they may need to specify what json to use. 
+maybe we should rename that folder from "users" to oauth-clients
+
+also remove feature that lists the user name in each text file at the top
+make sure to account for ALL features that use the user system. this will be a massive change. 

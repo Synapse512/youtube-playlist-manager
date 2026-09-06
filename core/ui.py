@@ -1,11 +1,11 @@
 """
-Terminal UI, dashboard menu, interactive account display, and help output.
+Terminal UI, dashboard menu, interactive oauth-client display, and help output.
 """
 
 import sys
 
-from .config import VERSION, get_playlist_user
-from .auth import get_users
+from .config import VERSION
+from .auth import get_oauth_clients
 
 
 def terminal_link(text, url):
@@ -53,8 +53,6 @@ def show_menu(settings, playlist_data, parser=None):
             for idx, p_name in enumerate(recent_playlists, 1):
                 pid = playlists[p_name]
                 url = f"https://www.youtube.com/playlist?list={pid}"
-                user = get_playlist_user(playlist_data, p_name)
-                user_tag = f"  [{user}]" if user else ""
 
                 act = activity.get(p_name, {})
                 last_cmd = act.get("last_command")
@@ -64,40 +62,40 @@ def show_menu(settings, playlist_data, parser=None):
                 else:
                     last_edit_str = "None recorded"
 
-                print(f"    {idx}. {p_name} [{terminal_link(pid, url)}]{user_tag}")
+                print(f"    {idx}. {p_name} [{terminal_link(pid, url)}]")
                 print(f"       • most recent edit: {last_edit_str}")
                 print()
 
-    raw_user_limit = settings.get("menu_user_count", 3)
+    raw_client_limit = settings.get("menu_client_count", 3)
 
-    if raw_user_limit is False or str(raw_user_limit).strip().lower() in ("false", "no"):
-        user_limit = 0
-    elif isinstance(raw_user_limit, str) and raw_user_limit.strip().lower() == "all":
-        user_limit = None
-    elif raw_user_limit is True or str(raw_user_limit).strip().lower() in ("true", "yes"):
-        user_limit = 3
+    if raw_client_limit is False or str(raw_client_limit).strip().lower() in ("false", "no"):
+        client_limit = 0
+    elif isinstance(raw_client_limit, str) and raw_client_limit.strip().lower() == "all":
+        client_limit = None
+    elif raw_client_limit is True or str(raw_client_limit).strip().lower() in ("true", "yes"):
+        client_limit = 3
     else:
         try:
-            user_limit = max(0, int(raw_user_limit))
+            client_limit = max(0, int(raw_client_limit))
         except (ValueError, TypeError):
-            user_limit = 3
+            client_limit = 3
 
-    users = get_users()
-    if user_limit is not None:
-        displayed_users = users[:user_limit]
+    clients = get_oauth_clients()
+    if client_limit is not None:
+        displayed_clients = clients[:client_limit]
     else:
-        displayed_users = users
+        displayed_clients = clients
 
-    if user_limit != 0:
+    if client_limit != 0:
         leading_newline = "" if has_shown_section else "\n"
-        print(f"{leading_newline}  [*] Accounts:")
+        print(f"{leading_newline}  [*] OAuth Clients:")
         has_shown_section = True
-        if displayed_users:
-            for u in displayed_users:
-                print(f"      • {u}")
+        if displayed_clients:
+            for c in displayed_clients:
+                print(f"      • {c}")
             print()
         else:
-            print("      No accounts found in 'users/'.\n")
+            print("      No oauth clients found in 'oauth-clients/'.\n")
 
     cmd_leading_newline = "" if has_shown_section else "\n"
     print(f"{cmd_leading_newline}  [?] Available Commands:")
@@ -119,12 +117,17 @@ A CLI tool to manage, reorder, backup, and synchronize YouTube playlists locally
 Usage:
   python main.py <command> [arguments]
 
-Multi-Account Setup:
-  Place each user's OAuth client secret JSON in the 'users/' folder, renamed to '<username>.json'.
-  Example: users/dalton.json, users/john.json
-  Cached session tokens are stored automatically in 'data/tokens/<username>.json'.
-  Playlist account ownership is stored in data/playlists.json.
-  Playlist files also keep a '# user: <username>' header as a readable hint.
+OAuth Client Setup:
+  Place OAuth client secret JSONs in the 'oauth-clients/' folder, named however you like
+  (e.g. oauth-clients/project-a.json, oauth-clients/project-b.json).
+  Each file is just a credential tied to a Google Cloud project's API quota - it is
+  NOT a fixed user identity. Multiple oauth-client files can point at the same
+  project (and therefore share its quota), and any oauth-client file can be used
+  to log into any Google account.
+  No session tokens are cached: every command that talks to YouTube opens a fresh
+  browser login so you can pick the Google account you want for that run. If one
+  oauth-client's project runs out of daily quota, just re-run the command with a
+  different --client pointed at a project that still has quota left.
 
 Configuration (settings.json):
   Edit 'settings.json' in any text editor to customize tool behavior:
@@ -132,47 +135,44 @@ Configuration (settings.json):
       Prompts for confirmation before pushing to YouTube to prevent accidental overwrites. (Default: true)
   - "menu_playlist_count": <number> | "all"
       Number of playlists to show in the menu, or "all" to show all playlists. (Default: 3)
-  - "menu_user_count": <number> | "all"
-      Number of user accounts to show in the menu, or "all" to show all accounts. (Default: 3)
+  - "menu_client_count": <number> | "all"
+      Number of oauth clients to show in the menu, or "all" to show all of them. (Default: 3)
   - "enable_logging": true | false
       Records operation logs in 'logs/<name>.log' tracking additions, removals, and changes. (Default: true)
 
 Commands:
   menu    python main.py
-          Displays the welcome menu, recent playlists, and configured accounts.
+          Displays the welcome menu, recent playlists, and configured oauth clients.
 
-  link    python main.py link <id_or_url> [--user <username>]
-          Connects a YouTube Playlist ID or URL using the title fetched from YouTube.
-          Stores the playlist account in data/playlists.json and creates a playlist file
-          with a '# user: <username>' header (prompts to choose account
-          if multiple exist and --user is omitted).
+  link    python main.py link <id_or_url> [--client <name>]
+          Connects a YouTube Playlist ID or URL using the title fetched from YouTube
+          (prompts to choose an oauth client if multiple exist and --client is omitted).
 
   unlink  python main.py unlink <name>
           Removes a linked playlist.
 
   list    python main.py list
-          Displays all configured playlists with their associated user accounts and last CLI edit info.
+          Displays all configured playlists with their last CLI edit info.
 
-  pull    python main.py pull <name> [--user <username>]
+  pull    python main.py pull <name> [--client <name>]
           Downloads the live YouTube playlist into playlists/<name>.txt.
-          User is read from data/playlists.json if not specified.
 
-  push    python main.py push <name> [--user <username>]
+  push    python main.py push <name> [--client <name>]
           Pushes local .txt additions, deletions, and track order to YouTube and
           automatically formats URLs/IDs to <video_id> | <video_title> format.
-          User is read from data/playlists.json if not specified.
 
-  format  python main.py format <name> [--user <username>]
+  format  python main.py format <name> [--client <name>]
           Normalizes URLs/IDs into <video_id> | <title> format for readability.
-          User is read from data/playlists.json if not specified.
 
   help    python main.py help
           Displays this help message with all command usages.
 
 Options:
-  --user, -u  Specify the username (must match a file in users/<username>.json).
-              If omitted: auto-selected if 1 user exists, or prompted if multiple exist.
-  -h, --help  Print help
+  --client, -c  Specify which oauth-client JSON to use (must match a file in
+                oauth-clients/<name>.json). If omitted: auto-selected if only 1
+                oauth client exists, or prompted if multiple exist. This is never
+                remembered between runs - you choose it fresh every time.
+  -h, --help    Print help
 """
     print(help_text)
 
@@ -200,7 +200,7 @@ def dispatch_command(args, settings, playlist_data, parser=None):
     elif args.command == "link":
         target = getattr(args, "target", None) or getattr(args, "name", None)
         if not target:
-            print("[!] Error: Missing Playlist ID or URL. Syntax: python main.py link <id_or_url> [--user <username>]\n")
+            print("[!] Error: Missing Playlist ID or URL. Syntax: python main.py link <id_or_url> [--client <name>]\n")
             print_help()
             sys.exit(1)
         command_link(args, settings, playlist_data)
@@ -214,19 +214,19 @@ def dispatch_command(args, settings, playlist_data, parser=None):
         command_list(args, settings, playlist_data)
     elif args.command == "pull":
         if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py pull <name> [--user <username>]\n")
+            print("[!] Error: Missing target. Syntax: python main.py pull <name> [--client <name>]\n")
             print_help()
             sys.exit(1)
         command_pull(args, settings, playlist_data)
     elif args.command == "push":
         if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py push <name> [--user <username>]\n")
+            print("[!] Error: Missing target. Syntax: python main.py push <name> [--client <name>]\n")
             print_help()
             sys.exit(1)
         command_push(args, settings, playlist_data)
     elif args.command == "format":
         if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py format <name> [--user <username>]\n")
+            print("[!] Error: Missing target. Syntax: python main.py format <name> [--client <name>]\n")
             print_help()
             sys.exit(1)
         command_format(args, settings, playlist_data)

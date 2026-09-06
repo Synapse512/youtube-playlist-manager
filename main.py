@@ -37,7 +37,7 @@ def main():
         # Command: link
         link_parser = subparsers.add_parser("link", add_help=False)
         link_parser.add_argument("target", nargs="?", metavar="ID_OR_URL")
-        link_parser.add_argument("--user", "-u", default=None, metavar="USERNAME")
+        link_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         link_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: unlink
@@ -52,19 +52,19 @@ def main():
         # Command: pull
         pull_parser = subparsers.add_parser("pull", add_help=False)
         pull_parser.add_argument("target", nargs="?")
-        pull_parser.add_argument("--user", "-u", default=None, metavar="USERNAME")
+        pull_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         pull_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: push
         push_parser = subparsers.add_parser("push", add_help=False)
         push_parser.add_argument("target", nargs="?")
-        push_parser.add_argument("--user", "-u", default=None, metavar="USERNAME")
+        push_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         push_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: format
         format_parser = subparsers.add_parser("format", add_help=False)
         format_parser.add_argument("target", nargs="?")
-        format_parser.add_argument("--user", "-u", default=None, metavar="USERNAME")
+        format_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         format_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: help

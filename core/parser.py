@@ -123,9 +123,7 @@ def parse_playlist_file(file_path):
       - '<video_url> | <title>'
       - '<video_id>'
       - '<video_url>'
-    Recognizes directive comments:
-      - '# user: <username>'  — records the linked account as a readable file hint
-    Ignores empty lines and all other comments (lines starting with '#').
+    Ignores empty lines and comments (lines starting with '#').
     Returns (target_video_ids, target_video_titles, skipped_lines).
     """
     target_video_ids = []
@@ -136,10 +134,6 @@ def parse_playlist_file(file_path):
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line:
-                continue
-
-            # Detect special directive comments
-            if line.lower().startswith("# user:"):
                 continue
 
             if line.startswith("#"):
@@ -165,19 +159,15 @@ def parse_playlist_file(file_path):
     return target_video_ids, target_video_titles, skipped_lines
 
 
-def save_playlist_file(file_path, video_ids, video_titles, username=None):
+def save_playlist_file(file_path, video_ids, video_titles):
     """
     Rewrites the local playlist text file atomically with normalized format:
 
-    # user: <username>         (only when username is provided)
     # PULL BEFORE MAKING CHANGES
 
     <video_id> | <video_title>
     """
-    lines = []
-    if username:
-        lines.append(f"# user: {username}")
-    lines += ["# PULL BEFORE MAKING CHANGES", ""]
+    lines = ["# PULL BEFORE MAKING CHANGES", ""]
     for vid_id in video_ids:
         title = video_titles.get(vid_id) or "Untitled Video"
         lines.append(f"{vid_id} | {title}")

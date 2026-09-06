@@ -14,10 +14,8 @@ from .config import (
     save_playlist_data,
     record_activity,
     log_playlist_event,
-    get_playlist_user,
-    set_playlist_user,
 )
-from .auth import resolve_user, get_youtube_service
+from .auth import resolve_oauth_client, get_youtube_service
 from .parser import (
     extract_playlist_id,
     sanitize_filename,
@@ -29,30 +27,27 @@ from .parser import (
 from .sync import compute_minimal_moves
 
 
-def _resolve_command_user(args, playlist_data, playlist_name):
-    """Resolves the account for playlist operations from args or data/playlists.json."""
-    explicit_user = getattr(args, "user", None)
-    data_user = get_playlist_user(playlist_data, playlist_name)
-
-    username = resolve_user(explicit_user or data_user, allow_prompt=True)
-
-    if explicit_user or not data_user:
-        set_playlist_user(playlist_data, playlist_name, username)
-
-    return username
+def _resolve_command_client(args):
+    """
+    Resolves which oauth-client JSON to use for this operation.
+    Nothing is remembered between runs - the oauth-client is picked fresh every
+    time (unless --client is passed or only one oauth-client exists).
+    """
+    explicit_client = getattr(args, "client", None)
+    return resolve_oauth_client(explicit_client, allow_prompt=True)
 
 
 def command_link(args, settings, playlist_data):
     """Links a YouTube playlist to data/playlists.json using the title fetched from YouTube."""
     raw_input = getattr(args, "target", None) or getattr(args, "name", None) or getattr(args, "id", None)
     if not raw_input:
-        print("[!] Error: Missing Playlist ID or URL. Syntax: python main.py link <id_or_url> [--user <username>]\n")
+        print("[!] Error: Missing Playlist ID or URL. Syntax: python main.py link <id_or_url> [--client <name>]\n")
         from .ui import print_help
         print_help()
         return
 
-    # Resolve user first (prompts to select an account if multiple users exist and --user is omitted)
-    username = resolve_user(getattr(args, "user", None), allow_prompt=True)
+    # Resolve which oauth-client JSON to use for this operation (prompts if multiple exist and --client is omitted)
+    oauth_client = _resolve_command_client(args)
 
     raw_id = raw_input.strip()
     playlist_id = extract_playlist_id(raw_id)
@@ -61,7 +56,7 @@ def command_link(args, settings, playlist_data):
         return
 
     print(f"[*] Fetching playlist title from YouTube ({playlist_id})...")
-    youtube = get_youtube_service(username)
+    youtube = get_youtube_service(oauth_client)
     try:
         res = youtube.playlists().list(part="snippet", id=playlist_id).execute()
         items = res.get("items", [])
@@ -90,26 +85,24 @@ def command_link(args, settings, playlist_data):
         playlists[playlist_name] = playlist_id
         save_playlist_data(playlist_data)
 
-    set_playlist_user(playlist_data, playlist_name, username)
-
-    # Create initial playlist file with user header and reminder
+    # Create initial playlist file with a reminder to pull before editing
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{playlist_name}.txt")
     if not os.path.exists(file_path):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"# user: {username}\n# PULL BEFORE MAKING CHANGES\n\n")
+                f.write("# PULL BEFORE MAKING CHANGES\n\n")
             print(f"[+] Created initial playlist file '{file_path}'.")
         except OSError as e:
             print(f"[!] Warning: Could not create initial file '{file_path}': {e}")
 
-    print(f"[+] Successfully linked '{playlist_name}' -> Playlist ID: '{playlist_id}' (user: {username})")
+    print(f"[+] Successfully linked '{playlist_name}' -> Playlist ID: '{playlist_id}'")
     record_activity(playlist_data, playlist_name, "link")
     log_playlist_event(
         settings,
         playlist_name,
         "link",
-        username,
+        oauth_client,
         summary_lines=[f"Linked '{playlist_name}' -> Playlist ID '{playlist_id}'"],
         playlist_data=playlist_data
     )
@@ -134,9 +127,6 @@ def command_unlink(args, settings, playlist_data):
         activity = playlist_data.get("activity", {})
         if target_name in activity:
             del activity[target_name]
-        playlist_users = playlist_data.get("playlist_users", {})
-        if target_name in playlist_users:
-            del playlist_users[target_name]
         save_playlist_data(playlist_data)
         print(f"[+] Unlinked playlist '{target_name}'.")
         log_playlist_event(
@@ -152,7 +142,7 @@ def command_unlink(args, settings, playlist_data):
 
 
 def command_list(args, settings, playlist_data):
-    """Lists all configured playlists with user account and last edit info."""
+    """Lists all configured playlists with last edit info."""
     from .ui import terminal_link
 
     playlists = playlist_data.get("playlists", {})
@@ -165,8 +155,6 @@ def command_list(args, settings, playlist_data):
     print("Configured Playlists:")
     for name, pid in playlists.items():
         url = f"https://www.youtube.com/playlist?list={pid}"
-        user = get_playlist_user(playlist_data, name)
-        user_tag = f"  [{user}]" if user else ""
 
         act = activity.get(name, {})
         last_cmd = act.get("last_command")
@@ -176,7 +164,7 @@ def command_list(args, settings, playlist_data):
         else:
             last_info = "  (no CLI edits yet)"
 
-        print(f"  {name}{user_tag}  [{terminal_link(pid, url)}]{last_info}")
+        print(f"  {name}  [{terminal_link(pid, url)}]{last_info}")
 
 
 def command_pull(args, settings, playlist_data):
@@ -189,15 +177,15 @@ def command_pull(args, settings, playlist_data):
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
-    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
-    username = _resolve_command_user(args, playlist_data, playlist_name)
+    # Resolve which oauth-client JSON to use for this operation
+    oauth_client = _resolve_command_client(args)
 
     if playlist_id != target_name:
         print(f"[*] Target playlist '{target_name}' resolved to Playlist ID: {playlist_id}")
     else:
         print(f"[*] Using Playlist ID: {playlist_id}")
 
-    youtube = get_youtube_service(username)
+    youtube = get_youtube_service(oauth_client)
     print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}'...")
 
     next_page_token = None
@@ -241,7 +229,7 @@ def command_pull(args, settings, playlist_data):
 
     # Ensure items are ordered by their actual position in the playlist
     raw_items.sort(key=lambda x: x[0])
-    lines_to_write = [f"# user: {username}", "# PULL BEFORE MAKING CHANGES", ""] + [x[1] for x in raw_items]
+    lines_to_write = ["# PULL BEFORE MAKING CHANGES", ""] + [x[1] for x in raw_items]
 
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -253,7 +241,7 @@ def command_pull(args, settings, playlist_data):
     print("\n" + "=" * 55)
     print(" Pull Summary")
     print("=" * 55)
-    print(f"  * User:               {username}")
+    print(f"  * OAuth Client:       {oauth_client}")
     print(f"  * Tracks Fetched:  {len(raw_items):4d}")
     print(f"  * Pages Read:      {page_num - 1:4d} request(s)")
     print(f"  * API Quota Used:  {quota_units:4d} unit(s) (1 unit/page)")
@@ -264,7 +252,7 @@ def command_pull(args, settings, playlist_data):
         settings,
         playlist_name,
         "pull",
-        username,
+        oauth_client,
         summary_lines=[
             f"Fetched {len(raw_items)} track(s) across {page_num - 1} page(s) ({quota_units} quota units)"
         ],
@@ -302,10 +290,10 @@ def command_push(args, settings, playlist_data):
 
     print(f"[+] Parsed {len(target_video_ids)} valid tracks from local file.")
 
-    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
-    username = _resolve_command_user(args, playlist_data, playlist_name)
+    # Resolve which oauth-client JSON to use for this operation
+    oauth_client = _resolve_command_client(args)
 
-    youtube = get_youtube_service(username)
+    youtube = get_youtube_service(oauth_client)
     print(f"[*] Fetching current live playlist from YouTube ({playlist_id})...")
 
     current_items = []
@@ -489,7 +477,7 @@ def command_push(args, settings, playlist_data):
         else:
             resolved_titles[vid_id] = "Untitled Video"
 
-    if save_playlist_file(file_path, target_video_ids, resolved_titles, username):
+    if save_playlist_file(file_path, target_video_ids, resolved_titles):
         print(f"[+] Automatically updated and formatted local file '{file_path}' (replaced links with video IDs and titles).")
 
     # Calculate exact API quota units used
@@ -503,7 +491,7 @@ def command_push(args, settings, playlist_data):
     print("\n" + "=" * 58)
     print(" Synchronization Summary")
     print("=" * 58)
-    print(f"  * User:           {username}")
+    print(f"  * OAuth Client:   {oauth_client}")
     print(f"  * Deleted:     {deleted_count:4d} track(s)     ({delete_quota:5d} quota units)")
     print(f"  * Inserted:    {inserted_count:4d} track(s)     ({insert_quota:5d} quota units)")
     print(f"  * Reordered:   {moved_count:4d} track(s)     ({update_quota:5d} quota units)")
@@ -518,7 +506,7 @@ def command_push(args, settings, playlist_data):
         settings,
         playlist_name,
         "push",
-        username,
+        oauth_client,
         summary_lines=[
             f"{inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered ({total_quota} quota units)"
         ],
@@ -545,8 +533,8 @@ def command_format(args, settings, playlist_data):
         print("[!] Error: No valid video IDs or URLs found in the file.")
         return
 
-    # Resolve user: explicit --user flag > data/playlists.json > auto-detect / prompt
-    username = _resolve_command_user(args, playlist_data, playlist_name)
+    # Resolve which oauth-client JSON to use for this operation
+    oauth_client = _resolve_command_client(args)
 
     # Check for missing titles and fetch them from YouTube API in batches of 50
     missing_ids = [v for v in target_video_ids if not target_video_titles.get(v)]
@@ -554,7 +542,7 @@ def command_format(args, settings, playlist_data):
     if missing_ids:
         print(f"[*] Fetching titles for {len(missing_ids)} tracks from YouTube API...")
         try:
-            youtube = get_youtube_service(username)
+            youtube = get_youtube_service(oauth_client)
             for i in range(0, len(missing_ids), 50):
                 batch_ids = missing_ids[i:i + 50]
                 res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
@@ -571,13 +559,13 @@ def command_format(args, settings, playlist_data):
     for vid_id in target_video_ids:
         resolved_titles[vid_id] = target_video_titles.get(vid_id) or "Untitled Video"
 
-    if save_playlist_file(file_path, target_video_ids, resolved_titles, username):
+    if save_playlist_file(file_path, target_video_ids, resolved_titles):
         print(f"[+] Successfully formatted '{file_path}' ({len(target_video_ids)} tracks normalized).")
 
     print("\n" + "=" * 55)
     print(" Format Summary")
     print("=" * 55)
-    print(f"  * User:                 {username}")
+    print(f"  * OAuth Client:         {oauth_client}")
     print(f"  * Tracks Normalized: {len(target_video_ids):4d}")
     print(f"  * Titles Fetched:    {len(missing_ids):4d}")
     print(f"  * API Quota Used:    {quota_units:4d} unit(s) (1 unit/batch of 50)")
@@ -587,7 +575,7 @@ def command_format(args, settings, playlist_data):
         settings,
         playlist_name,
         "format",
-        username,
+        oauth_client,
         summary_lines=[
             f"Normalized {len(target_video_ids)} track(s), fetched {len(missing_ids)} missing title(s) ({quota_units} quota units)"
         ],
