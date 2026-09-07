@@ -99,13 +99,14 @@ def show_menu(settings, playlist_data, parser=None):
 
     cmd_leading_newline = "" if has_shown_section else "\n"
     print(f"{cmd_leading_newline}  [?] Available Commands:")
-    print("      python main.py pull <name>        Download playlist to local file")
-    print("      python main.py push <name>        Push changes and sync to YouTube")
-    print("      python main.py format <name>      Normalize track IDs and titles")
-    print("      python main.py list               List all configured playlists")
-    print("      python main.py link <id_or_url>   Link a new playlist (uses YouTube title)")
-    print("      python main.py unlink <name>      Remove a playlist link")
-    print("      python main.py help               Show full documentation and flags")
+    print("      python main.py pull <name>            Download playlist to local file")
+    print("      python main.py push <name>            Push changes and sync to YouTube")
+    print("      python main.py format <name>          Normalize track IDs and titles")
+    print("      python main.py download <name>        Download playlist as audio or video (yt-dlp)")
+    print("      python main.py list                   List all configured playlists")
+    print("      python main.py link <id_or_url>       Link a new playlist (uses YouTube title)")
+    print("      python main.py unlink <name>          Remove a playlist link")
+    print("      python main.py help                   Show full documentation and flags")
     print("=" * 70 + "\n")
 
 
@@ -139,33 +140,51 @@ Configuration (settings.json):
       Number of oauth clients to show in the menu, or "all" to show all of them. (Default: 3)
   - "enable_logging": true | false
       Records operation logs in 'logs/<name>.log' tracking additions, removals, and changes. (Default: true)
+  - "downloads_dir": "<folder_path>"
+      Root folder for yt-dlp playlist downloads. (Default: "playlist-downloads")
+  - "number_downloaded_files": true | false
+      Prefix filenames with track index (e.g. 01 - Song.mp3) matching text file order. (Default: true)
+  - "ytdlp_path": "<executable_path>"
+      Custom path to yt-dlp.exe (optional; searches project root and PATH by default).
+  - "ffmpeg_path": "<executable_path>"
+      Custom path to ffmpeg.exe (optional; searches project root and PATH by default).
 
 Commands:
-  menu    python main.py
-          Displays the welcome menu, recent playlists, and configured oauth clients.
+  menu          python main.py
+                Displays the welcome menu, recent playlists, and configured oauth clients.
 
-  link    python main.py link <id_or_url> [--client <name>]
-          Connects a YouTube Playlist ID or URL using the title fetched from YouTube
-          (prompts to choose an oauth client if multiple exist and --client is omitted).
+  link          python main.py link <id_or_url> [--client <name>]
+                Connects a YouTube Playlist ID or URL using the title fetched from YouTube
+                (prompts to choose an oauth client if multiple exist and --client is omitted).
 
-  unlink  python main.py unlink <name>
-          Removes a linked playlist.
+  unlink        python main.py unlink <name>
+                Removes a linked playlist.
 
-  list    python main.py list
-          Displays all configured playlists with their last CLI edit info.
+  list          python main.py list
+                Displays all configured playlists with their last CLI edit info.
 
-  pull    python main.py pull <name> [--client <name>]
-          Downloads the live YouTube playlist into playlists/<name>.txt.
+  pull          python main.py pull [<name>] [--client <name>]
+                Downloads the live YouTube playlist into playlists/<name>.txt
+                (prompts to select playlist if omitted and multiple exist).
 
-  push    python main.py push <name> [--client <name>]
-          Pushes local .txt additions, deletions, and track order to YouTube and
-          automatically formats URLs/IDs to <video_id> | <video_title> format.
+  push          python main.py push [<name>] [--client <name>]
+                Pushes local .txt additions, deletions, and track order to YouTube and
+                automatically formats URLs/IDs to <video_id> | <video_title> format
+                (prompts to select playlist if omitted and multiple exist).
 
-  format  python main.py format <name> [--client <name>]
-          Normalizes URLs/IDs into <video_id> | <title> format for readability.
+  format        python main.py format [<name>] [--client <name>]
+                Normalizes URLs/IDs into <video_id> | <title> format for readability
+                (prompts to select playlist if omitted and multiple exist).
 
-  help    python main.py help
-          Displays this help message with all command usages.
+  download      python main.py download [<name>] [--format audio|video]
+                Downloads all tracks from playlists/<name>.txt using yt-dlp.
+                Audio mode downloads best quality in native format (no ffmpeg needed).
+                Video mode downloads MP4 video (requires ffmpeg).
+                Saves to <downloads_dir>/<name>/ with incremental caching.
+                (Prompts to select playlist and audio/video format if omitted).
+
+  help          python main.py help
+                Displays this help message with all command usages.
 
 Options:
   --client, -c  Specify which oauth-client JSON to use (must match a file in
@@ -187,6 +206,8 @@ def dispatch_command(args, settings, playlist_data, parser=None):
         command_push,
         command_format,
     )
+    from .parser import resolve_target_playlist
+    from .downloader import command_download
 
     if not args or not getattr(args, "command", None):
         return
@@ -213,20 +234,35 @@ def dispatch_command(args, settings, playlist_data, parser=None):
     elif args.command == "list":
         command_list(args, settings, playlist_data)
     elif args.command == "pull":
-        if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py pull <name> [--client <name>]\n")
-            print_help()
-            sys.exit(1)
+        args.target = resolve_target_playlist(
+            getattr(args, "target", None),
+            playlist_data,
+            allow_prompt=True,
+            command_name="pull"
+        )
         command_pull(args, settings, playlist_data)
     elif args.command == "push":
-        if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py push <name> [--client <name>]\n")
-            print_help()
-            sys.exit(1)
+        args.target = resolve_target_playlist(
+            getattr(args, "target", None),
+            playlist_data,
+            allow_prompt=True,
+            command_name="push"
+        )
         command_push(args, settings, playlist_data)
     elif args.command == "format":
-        if not args.target:
-            print("[!] Error: Missing target. Syntax: python main.py format <name> [--client <name>]\n")
-            print_help()
-            sys.exit(1)
+        args.target = resolve_target_playlist(
+            getattr(args, "target", None),
+            playlist_data,
+            allow_prompt=True,
+            command_name="format"
+        )
         command_format(args, settings, playlist_data)
+    elif args.command == "download":
+        args.target = resolve_target_playlist(
+            getattr(args, "target", None),
+            playlist_data,
+            allow_prompt=True,
+            command_name="download"
+        )
+        fmt = getattr(args, "format", None)
+        command_download(args, settings, playlist_data, fmt=fmt)

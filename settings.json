@@ -2,5 +2,9 @@
     "safety_check_before_push": true,
     "menu_playlist_count": 3,
     "menu_client_count": 3,
-    "enable_logging": true
+    "enable_logging": true,
+    "downloads_dir": "playlist-downloads",
+    "number_downloaded_files": true,
+    "ytdlp_path": "",
+    "ffmpeg_path": ""
 }

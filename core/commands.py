@@ -188,6 +188,14 @@ def command_pull(args, settings, playlist_data):
     youtube = get_youtube_service(oauth_client)
     print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}'...")
 
+    # Check if local file already exists to preserve custom blank line spacing
+    existing_blank_above = set()
+    if os.path.exists(file_path):
+        try:
+            _, _, _, existing_blank_above = parse_playlist_file(file_path)
+        except Exception:
+            pass
+
     next_page_token = None
     raw_items = []
     page_num = 1
@@ -210,7 +218,7 @@ def command_pull(args, settings, playlist_data):
                 title = snippet.get("title", "Untitled")
                 pos = snippet.get("position", len(raw_items))
                 if v_id:
-                    raw_items.append((pos, f"{v_id} | {title}"))
+                    raw_items.append((pos, v_id, title))
 
             next_page_token = res.get("nextPageToken")
             page_num += 1
@@ -229,23 +237,20 @@ def command_pull(args, settings, playlist_data):
 
     # Ensure items are ordered by their actual position in the playlist
     raw_items.sort(key=lambda x: x[0])
-    lines_to_write = ["# PULL BEFORE MAKING CHANGES", ""] + [x[1] for x in raw_items]
+    pulled_video_ids = [x[1] for x in raw_items]
+    pulled_titles = {x[1]: x[2] for x in raw_items}
 
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines_to_write) + "\n")
-    except OSError as e:
-        print(f"[!] Error writing playlist file '{file_path}': {e}")
+    if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above):
         return
 
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 60)
     print(" Pull Summary")
-    print("=" * 55)
-    print(f"  * OAuth Client:       {oauth_client}")
-    print(f"  * Tracks Fetched:  {len(raw_items):4d}")
-    print(f"  * Pages Read:      {page_num - 1:4d} request(s)")
-    print(f"  * API Quota Used:  {quota_units:4d} unit(s) (1 unit/page)")
-    print("=" * 55)
+    print("=" * 60)
+    print(f"  * {'OAuth Client:':<22} {oauth_client}")
+    print(f"  * {'Tracks Fetched:':<22} {len(raw_items):>4d} track(s)")
+    print(f"  * {'Pages Read:':<22} {page_num - 1:>4d} request(s)")
+    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)      (1 unit/page)")
+    print("=" * 60)
     print(f"[+] Successfully pulled {len(raw_items)} tracks to '{file_path}'!\n")
     record_activity(playlist_data, playlist_name, "pull")
     log_playlist_event(
@@ -282,7 +287,7 @@ def command_push(args, settings, playlist_data):
 
     # Parse local text file (supports IDs, URLs, and ID|Title formats)
     print(f"[*] Reading and validating local file '{file_path}'...")
-    target_video_ids, target_video_titles, skipped = parse_playlist_file(file_path)
+    target_video_ids, target_video_titles, skipped, blank_above = parse_playlist_file(file_path)
 
     if not target_video_ids:
         print("[!] Error: No valid video IDs or URLs found in the local text file. Push aborted.")
@@ -477,7 +482,7 @@ def command_push(args, settings, playlist_data):
         else:
             resolved_titles[vid_id] = "Untitled Video"
 
-    if save_playlist_file(file_path, target_video_ids, resolved_titles):
+    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above):
         print(f"[+] Automatically updated and formatted local file '{file_path}' (replaced links with video IDs and titles).")
 
     # Calculate exact API quota units used
@@ -488,17 +493,17 @@ def command_push(args, settings, playlist_data):
     update_quota = moved_count * 50
     total_quota = list_quota + delete_quota + insert_quota + update_quota
 
-    print("\n" + "=" * 58)
+    print("\n" + "=" * 60)
     print(" Synchronization Summary")
-    print("=" * 58)
-    print(f"  * OAuth Client:   {oauth_client}")
-    print(f"  * Deleted:     {deleted_count:4d} track(s)     ({delete_quota:5d} quota units)")
-    print(f"  * Inserted:    {inserted_count:4d} track(s)     ({insert_quota:5d} quota units)")
-    print(f"  * Reordered:   {moved_count:4d} track(s)     ({update_quota:5d} quota units)")
-    print(f"  * Read/List:   {list_units:4d} request(s)   ({list_quota:5d} quota units)")
-    print("-" * 58)
-    print(f"  * Total Quota Used: {total_quota:5d} units")
-    print("=" * 58)
+    print("=" * 60)
+    print(f"  * {'OAuth Client:':<22} {oauth_client}")
+    print(f"  * {'Deleted:':<22} {deleted_count:>4d} track(s)     ({delete_quota:>5d} quota units)")
+    print(f"  * {'Inserted:':<22} {inserted_count:>4d} track(s)     ({insert_quota:>5d} quota units)")
+    print(f"  * {'Reordered:':<22} {moved_count:>4d} track(s)     ({update_quota:>5d} quota units)")
+    print(f"  * {'Read/List:':<22} {list_units:>4d} request(s)   ({list_quota:>5d} quota units)")
+    print("-" * 60)
+    print(f"  * {'Total Quota Used:':<22} {total_quota:>4d} unit(s)")
+    print("=" * 60)
     print("[+] Playlist synchronization complete!\n")
     record_activity(playlist_data, playlist_name, "push")
     diff_details = deleted_details + inserted_details + moved_details
@@ -527,7 +532,7 @@ def command_format(args, settings, playlist_data):
         return
 
     print(f"[*] Reading and formatting '{file_path}'...")
-    target_video_ids, target_video_titles, _ = parse_playlist_file(file_path)
+    target_video_ids, target_video_titles, _, blank_above = parse_playlist_file(file_path)
 
     if not target_video_ids:
         print("[!] Error: No valid video IDs or URLs found in the file.")
@@ -559,17 +564,17 @@ def command_format(args, settings, playlist_data):
     for vid_id in target_video_ids:
         resolved_titles[vid_id] = target_video_titles.get(vid_id) or "Untitled Video"
 
-    if save_playlist_file(file_path, target_video_ids, resolved_titles):
+    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above):
         print(f"[+] Successfully formatted '{file_path}' ({len(target_video_ids)} tracks normalized).")
 
-    print("\n" + "=" * 55)
+    print("\n" + "=" * 60)
     print(" Format Summary")
-    print("=" * 55)
-    print(f"  * OAuth Client:         {oauth_client}")
-    print(f"  * Tracks Normalized: {len(target_video_ids):4d}")
-    print(f"  * Titles Fetched:    {len(missing_ids):4d}")
-    print(f"  * API Quota Used:    {quota_units:4d} unit(s) (1 unit/batch of 50)")
-    print("=" * 55 + "\n")
+    print("=" * 60)
+    print(f"  * {'OAuth Client:':<22} {oauth_client}")
+    print(f"  * {'Tracks Normalized:':<22} {len(target_video_ids):>4d} track(s)")
+    print(f"  * {'Titles Fetched:':<22} {len(missing_ids):>4d} track(s)")
+    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)      (1 unit/batch of 50)")
+    print("=" * 60 + "\n")
     record_activity(playlist_data, playlist_name, "format")
     log_playlist_event(
         settings,

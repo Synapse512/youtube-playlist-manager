@@ -25,3 +25,16 @@ __pycache__/
 *.py[cod]
 *.bak
 *.tmp
+
+# Playlist downloads
+playlist-downloads/*
+!playlist-downloads/.gitkeep
+
+# yt-dlp and ffmpeg binaries (if downloaded locally)
+yt-dlp.exe
+yt-dlp
+ffmpeg.exe
+ffmpeg
+ffprobe.exe
+ffprobe
+

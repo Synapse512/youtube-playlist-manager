@@ -7,7 +7,7 @@ import json
 import shutil
 from datetime import datetime
 
-VERSION = "1.0.2"
+VERSION = "1.1.2"
 
 SETTINGS_FILE = "settings.json"
 DATA_DIR = "data"
@@ -15,6 +15,7 @@ PLAYLISTS_DATA_FILE = os.path.join(DATA_DIR, "playlists.json")
 OAUTH_CLIENTS_DIR = "oauth-clients"
 PLAYLISTS_DIR = "playlists"
 LOGS_DIR = "logs"
+DOWNLOADS_DIR = "playlist-downloads"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
@@ -25,7 +26,11 @@ def load_settings():
         "safety_check_before_push": True,
         "menu_playlist_count": 3,
         "menu_client_count": 3,
-        "enable_logging": True
+        "enable_logging": True,
+        "downloads_dir": "playlist-downloads",
+        "number_downloaded_files": True,
+        "ytdlp_path": "",
+        "ffmpeg_path": ""
     }
     if not os.path.exists(SETTINGS_FILE):
         print(f"[*] Settings file not found. Creating default '{SETTINGS_FILE}'...")
@@ -41,6 +46,10 @@ def load_settings():
             settings.setdefault("menu_playlist_count", 3)
             settings.setdefault("menu_client_count", 3)
             settings.setdefault("enable_logging", True)
+            settings.setdefault("downloads_dir", "playlist-downloads")
+            settings.setdefault("number_downloaded_files", True)
+            settings.setdefault("ytdlp_path", "")
+            settings.setdefault("ffmpeg_path", "")
             return settings
     except (json.JSONDecodeError, ValueError, OSError) as e:
         backup_file = f"{SETTINGS_FILE}.corrupted.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"

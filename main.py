@@ -67,6 +67,12 @@ def main():
         format_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         format_parser.add_argument("-h", "--help", action="store_true")
 
+        # Command: download (supports --format audio/video, prompts if omitted)
+        dl_parser = subparsers.add_parser("download", add_help=False)
+        dl_parser.add_argument("target", nargs="?")
+        dl_parser.add_argument("--format", "-f", choices=["audio", "video"], default=None, help="Download mode: audio or video (prompts if omitted)")
+        dl_parser.add_argument("-h", "--help", action="store_true")
+
         # Command: help
         help_parser = subparsers.add_parser("help", add_help=False)
         help_parser.add_argument("-h", "--help", action="store_true")
