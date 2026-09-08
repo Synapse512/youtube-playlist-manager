@@ -170,4 +170,4 @@ YouTube Data API v3 has a daily default quota of **10,000 units per Google Cloud
 
 ---
 
-Note: I made this project using Google Antigravity, since I basically know nothing about Python. Though, I figured since this is actually useful I'd upload it. I have ran many different tests using real oauth clients and large playlists (400+ videos), and did not encounter any issues, and all safety fallbacks worked as they should. 
+Note: I wrote the code in this project with Google Antigravity, mostly because I was in a rush to get this into a usable state, but also because Python is not my specialty. I have run many different tests using real oauth clients and large playlists (400+ videos), and did not encounter any issues, and all safety fallbacks worked as they should. 
