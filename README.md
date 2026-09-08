@@ -1,4 +1,4 @@
-# YouTube Playlist Manager (ypm)
+# YouTube Playlist Manager `(ypm)`
 
 **CLI tool for managing yt-playlists both online and locally**
 
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 
 ### 3. OAuth Clients & Quota
 
-An oauth-client JSON is just an OAuth client secret tied to a Google Cloud project's API quota - it is **not** a fixed user account. Each project gets its own daily quota, and any oauth-client file can be used to log into *any* Google account.
+An oauth-client JSON is just an OAuth client secret tied to a Google Cloud project's API quota - it is **not** a fixed user account. Each project gets its own daily quota, and any oauth-client file can be used to log into *any* Google account. Do not share these files, people can exploit your Google Cloud projects with the file info. 
 
 - You can create multiple oauth-client files under the **same** Google Cloud project - they all draw from that project's shared quota.
 - You can also create oauth-client files under **different** projects to get separate, independent quota pools.
@@ -91,7 +91,7 @@ youtube-playlist-manager/
 | **download** | `python main.py download [<name>] [--format audio\|video]` | Downloads playlist as audio or video using `yt-dlp`. (Prompts for playlist and format if omitted) |
 | **help** | `python main.py help` | Displays help information with all command usages |
 
-For commands operating on a playlist (`pull`, `push`, `format`, `download`), `<name>` is optional. If omitted, it will be auto-selected if only 1 playlist exists, or you will be prompted with an interactive selection menu if multiple playlists exist. For `download`, if `--format` is omitted, you will be prompted to choose audio or video.
+For commands operating on a playlist (`pull`, `push`, `format`, `download`), the `<name>` param is optional. If omitted, it will be auto-selected if only 1 playlist exists, or you will be prompted with an interactive selection menu if multiple playlists exist. For `download`, if `--format` is omitted, you will be prompted to choose audio or video.
 
 `--client` / `-c` picks which oauth-client JSON to use for that single run. If omitted, it's auto-selected when only one exists, or you'll be prompted to choose when there are several. This choice is never saved - you pick fresh every time.
 
@@ -104,14 +104,14 @@ The core workflow of `ypm` revolves around editing local `.txt` files in `playli
    ```bash
    python main.py link <id_or_url>
    ```
-   This fetches the playlist's title from YouTube and registers it in `data/playlists.json`.
+   This fetches the playlist's title from YouTube and registers it in `playlists/` as a text file. It will not have any video ids or titles stored in it yet.
 
 2. **Pull Tracks Locally**:
    Download the live track order into your local text file:
    ```bash
    python main.py pull
    ```
-   This creates `playlists/<name>.txt` containing your tracks formatted as `<video_id> | <video_title>`.
+   This populates the file with each video from your playlist in the correct order, formatted as `<video_id> | <video_title>`.
 
 3. **Rearrange & Reorder**:
    Open `playlists/<name>.txt` in any text editor. Simply cut and paste lines to rearrange tracks into whatever order you want.
@@ -141,8 +141,7 @@ python main.py download
 You will be prompted to choose **audio** or **video** if you don't specify `--format audio|video`.
 
 - **Incremental downloads**: Only tracks not yet on disk are downloaded. Already-downloaded tracks are skipped automatically, so re-running the command is always safe.
-- **Track ordering**: When `"number_downloaded_files": true` in `settings.json`, every file is prefixed with its playlist position (e.g. `01 - Song.mp3`, `02 - Song.mp3`). This forces the correct sort order in your OS file manager or media player without relying on ID3/metadata.
-- **Automatic rename sync**: If you toggle `"number_downloaded_files"`, reorder tracks in your `.txt` file, or both - just run `download` again. The tool will rename existing files on disk to match the new numbering/order *without* re-downloading anything. Files whose titles can't be matched to a playlist entry (e.g. files you added manually) are left untouched.
+- **Track ordering**: When `"number_downloaded_files": true` in `settings.json`, every file is prefixed with its playlist position (e.g. `01 - Song.mp3`, `02 - Song.mp3`). This forces the correct sort order in your OS file manager or media player without relying on ID3/metadata. If you want to remove the numbered order from your installed playlist, simply toggle `"number_downloaded_files"` to `"true`, and re-run the `download` command, it will change the titles rather than redownload everything. 
 - **Archive file**: Each playlist download folder contains a hidden `.ytdlp_archive.txt`. This is how `yt-dlp` tracks what it has already fetched. It stays inside the playlist folder so the cache travels with the files if you move the folder.
 
 ### 6. Configuration (`settings.json`)
