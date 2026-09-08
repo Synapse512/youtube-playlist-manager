@@ -1,9 +1,13 @@
 # YouTube Playlist Manager (ypm)
 
-CLI tool for managing yt-playlists both online and locally
+**CLI tool for managing yt-playlists both online and locally**
 
-#### Why use ypm?
+### Why use ypm?
 You can use ypm management systems to control both online and local versions of your Youtube playlists at the same time without any extra work. Also, it makes it easier to do bulk operations of reordering, removing, and inserting playlist content.
+
+<img width="800" src="https://github.com/user-attachments/assets/2d367699-7dd9-49e2-9407-03436da0188a" alt="ypm-preview-image" />
+
+---
 
 ### 1. Installation
 
