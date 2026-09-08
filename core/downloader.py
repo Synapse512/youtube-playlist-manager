@@ -89,6 +89,27 @@ def _read_archive_ids(archive_path):
     return ids
 
 
+_AUDIO_EXTS = {'.opus', '.m4a', '.mp3', '.aac', '.flac', '.ogg', '.wav'}
+_VIDEO_EXTS = {'.mp4', '.mkv', '.mov', '.avi'}
+
+
+def _detect_folder_format(folder):
+    """Returns 'audio', 'video', or None if the folder is empty or has no recognisable media."""
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+    for fname in entries:
+        if fname.startswith('.'):
+            continue
+        ext = os.path.splitext(fname)[1].lower()
+        if ext in _AUDIO_EXTS:
+            return 'audio'
+        if ext in _VIDEO_EXTS:
+            return 'video'
+    return None
+
+
 _NUM_PREFIX_RE = re.compile(r'^(\d+)\s+-\s+(.+)$')
 
 # Characters yt-dlp substitutes or strips in filenames on various platforms.
@@ -274,12 +295,33 @@ def command_download(args, settings, playlist_data, fmt=None):
         print("[!] Error: No valid video IDs or URLs found in the local text file.")
         return
 
-    # Resolve output directory
+    # Resolve output directory — all formats share the same flat folder.
+    # If the folder already contains files from a different format they are
+    # deleted and the archive is cleared so yt-dlp re-downloads everything.
     downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
     playlist_download_dir = os.path.join(downloads_root, safe_name)
     os.makedirs(playlist_download_dir, exist_ok=True)
 
+    existing_fmt = _detect_folder_format(playlist_download_dir)
     archive_file = os.path.join(playlist_download_dir, ".ytdlp_archive.txt")
+    if existing_fmt and existing_fmt != fmt:
+        print(f"[*] Folder contains {existing_fmt} files — switching to {fmt}. Removing old files...")
+        removed = 0
+        for fname in os.listdir(playlist_download_dir):
+            fpath = os.path.join(playlist_download_dir, fname)
+            if os.path.isfile(fpath) and not fname.startswith('.'):
+                try:
+                    os.remove(fpath)
+                    removed += 1
+                except OSError as exc:
+                    print(f"    [!] Could not remove '{fname}': {exc}")
+        # Reset archive so yt-dlp treats everything as new
+        try:
+            os.remove(archive_file)
+        except OSError:
+            pass
+        print(f"    Removed {removed} old file(s). Starting fresh download.")
+
     initial_archived = _read_archive_ids(archive_file)
 
     already_cached = [v for v in target_video_ids if v in initial_archived]
@@ -329,20 +371,23 @@ def command_download(args, settings, playlist_data, fmt=None):
     else:
         output_template = os.path.join(playlist_download_dir, "%(title)s.%(ext)s")
 
+    ffmpeg_bin = find_ffmpeg(settings)
     cmd = [ytdlp_bin]
     if fmt == "audio":
-        # Download best quality audio in its native format (no ffmpeg conversion required)
+        # Download best quality audio in its native format.
+        # When ffmpeg is available, embed the video's thumbnail as album art.
         cmd += [
             "--format", "bestaudio/best",
             "--extract-audio",
         ]
+        if ffmpeg_bin:
+            cmd += ["--embed-thumbnail"]
     else:  # video
         cmd += [
             "--format", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b",
             "--merge-output-format", "mp4",
         ]
 
-    ffmpeg_bin = find_ffmpeg(settings)
     if ffmpeg_bin:
         cmd += ["--ffmpeg-location", ffmpeg_bin]
     else:
