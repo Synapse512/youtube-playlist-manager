@@ -39,6 +39,14 @@ def _resolve_command_client(args):
 
 def command_link(args, settings, playlist_data):
     """Links a YouTube playlist to data/playlists.json using the title fetched from YouTube."""
+    from .downloader import (
+        fetch_playlist_title_ytdlp,
+        DOWNLOAD_SETTINGS_FILENAME,
+        save_playlist_download_settings,
+        load_playlist_download_settings,
+    )
+    from .config import DOWNLOADS_DIR
+
     raw_input = getattr(args, "target", None) or getattr(args, "name", None) or getattr(args, "id", None)
     if not raw_input:
         print("[!] Error: Missing Playlist ID or URL. Syntax: python main.py link <id_or_url> [--client <name>]\n")
@@ -46,31 +54,52 @@ def command_link(args, settings, playlist_data):
         print_help()
         return
 
-    # Resolve which oauth-client JSON to use for this operation (prompts if multiple exist and --client is omitted)
-    oauth_client = _resolve_command_client(args)
-
     raw_id = raw_input.strip()
     playlist_id = extract_playlist_id(raw_id)
     if not playlist_id:
         print(f"[!] Error: Could not extract a valid Playlist ID from '{raw_id}'.")
         return
 
-    print(f"[*] Fetching playlist title from YouTube ({playlist_id})...")
-    youtube = get_youtube_service(oauth_client)
-    try:
-        res = youtube.playlists().list(part="snippet", id=playlist_id).execute()
-        items = res.get("items", [])
-        if not items:
-            print(f"[!] Error: Playlist ID '{playlist_id}' not found on YouTube.")
+    link_method = (getattr(args, "method", None) or settings.get("link_method", "auto")).strip().lower()
+    explicit_client = getattr(args, "client", None)
+    if explicit_client:
+        link_method = "api"
+
+    playlist_name = None
+    oauth_client = None
+    method_used = "yt-dlp (0 quota)"
+
+    if link_method in ("auto", "ytdlp"):
+        print(f"[*] Fetching playlist title using yt-dlp ({playlist_id})...")
+        title = fetch_playlist_title_ytdlp(playlist_id, settings)
+        if title:
+            playlist_name = sanitize_filename(title)
+            print(f"[+] Fetched playlist title via yt-dlp: '{playlist_name}' (0 API quota)")
+        else:
+            if link_method == "ytdlp":
+                print(f"[!] Error: Could not fetch playlist title via yt-dlp. Make sure the playlist is public/unlisted.")
+                return
+            print(f"[*] yt-dlp could not access playlist title (it may be private). Falling back to YouTube API...")
+
+    if not playlist_name:
+        oauth_client = _resolve_command_client(args)
+        method_used = f"YouTube API ({oauth_client})"
+        print(f"[*] Fetching playlist title from YouTube API ({playlist_id})...")
+        youtube = get_youtube_service(oauth_client)
+        try:
+            res = youtube.playlists().list(part="snippet", id=playlist_id).execute()
+            items = res.get("items", [])
+            if not items:
+                print(f"[!] Error: Playlist ID '{playlist_id}' not found on YouTube.")
+                return
+            title = items[0].get("snippet", {}).get("title", "").strip()
+            if not title:
+                title = playlist_id
+            playlist_name = sanitize_filename(title)
+            print(f"[+] Using fetched playlist title: '{playlist_name}'")
+        except Exception as e:
+            print(f"[!] Error fetching playlist title from YouTube: {e}")
             return
-        title = items[0].get("snippet", {}).get("title", "").strip()
-        if not title:
-            title = playlist_id
-        playlist_name = sanitize_filename(title)
-        print(f"[+] Using fetched playlist title: '{playlist_name}'")
-    except Exception as e:
-        print(f"[!] Error fetching playlist title from YouTube: {e}")
-        return
 
     playlists = playlist_data.setdefault("playlists", {})
     if playlist_name in playlists:
@@ -96,14 +125,33 @@ def command_link(args, settings, playlist_data):
         except OSError as e:
             print(f"[!] Warning: Could not create initial file '{file_path}': {e}")
 
+    # Initialize the playlist-downloads folder and default _setting.json
+    downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
+    playlist_download_dir = os.path.join(downloads_root, playlist_name)
+    os.makedirs(playlist_download_dir, exist_ok=True)
+    settings_path = os.path.join(playlist_download_dir, DOWNLOAD_SETTINGS_FILENAME)
+    if not os.path.exists(settings_path):
+        existing = load_playlist_download_settings(playlist_download_dir)
+        if not existing:
+            default_settings = {
+                "format": "audio",
+                "embed_thumbnail": True,
+                "number_files": True,
+                "tracks": {}
+            }
+            save_playlist_download_settings(playlist_download_dir, default_settings)
+            print(f"[+] Initialized download folder and settings: '{playlist_download_dir}/'")
+    else:
+        print(f"[*] Download folder already initialized: '{playlist_download_dir}/'")
+
     print(f"[+] Successfully linked '{playlist_name}' -> Playlist ID: '{playlist_id}'")
     record_activity(playlist_data, playlist_name, "link")
     log_playlist_event(
         settings,
         playlist_name,
         "link",
-        oauth_client,
-        summary_lines=[f"Linked '{playlist_name}' -> Playlist ID '{playlist_id}'"],
+        oauth_client or method_used,
+        summary_lines=[f"Linked '{playlist_name}' -> Playlist ID '{playlist_id}' via {method_used}"],
         playlist_data=playlist_data
     )
 
@@ -166,9 +214,10 @@ def command_list(args, settings, playlist_data):
 
         print(f"  {name}  [{terminal_link(pid, url)}]{last_info}")
 
-
 def command_pull(args, settings, playlist_data):
     """Pulls a remote YouTube playlist into a local text file."""
+    from .downloader import fetch_playlist_tracks_ytdlp
+
     target_name = args.target.strip()
     playlist_id = resolve_playlist_id(target_name, playlist_data)
     playlist_name = get_playlist_name_for_target(target_name, playlist_data)
@@ -177,68 +226,184 @@ def command_pull(args, settings, playlist_data):
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
-    # Resolve which oauth-client JSON to use for this operation
-    oauth_client = _resolve_command_client(args)
+    # Check if local file already exists to preserve custom blank line spacing and compute diff
+    existing_blank_above = set()
+    existing_video_ids = []
+    existing_titles = {}
+    if os.path.exists(file_path):
+        try:
+            existing_video_ids, existing_titles, _, existing_blank_above = parse_playlist_file(file_path)
+        except Exception:
+            pass
+
+    pull_method = (getattr(args, "method", None) or settings.get("pull_method", "auto")).strip().lower()
+    explicit_client = getattr(args, "client", None)
+    if explicit_client:
+        pull_method = "api"
 
     if playlist_id != target_name:
         print(f"[*] Target playlist '{target_name}' resolved to Playlist ID: {playlist_id}")
     else:
         print(f"[*] Using Playlist ID: {playlist_id}")
 
-    youtube = get_youtube_service(oauth_client)
-    print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}'...")
-
-    # Check if local file already exists to preserve custom blank line spacing
-    existing_blank_above = set()
-    if os.path.exists(file_path):
-        try:
-            _, _, _, existing_blank_above = parse_playlist_file(file_path)
-        except Exception:
-            pass
-
-    next_page_token = None
-    raw_items = []
-    page_num = 1
+    pulled_video_ids = None
+    pulled_titles = {}
+    method_used = "yt-dlp"
+    oauth_client = None
+    pages_read = 0
     quota_units = 0
 
-    try:
-        while True:
-            print(f"    Fetching page {page_num}...")
-            res = youtube.playlistItems().list(
-                part="snippet",
-                playlistId=playlist_id,
-                maxResults=50,
-                pageToken=next_page_token
-            ).execute()
-            quota_units += 1  # 1 unit per playlistItems.list call
-
-            for item in res.get("items", []):
-                snippet = item.get("snippet", {})
-                v_id = snippet.get("resourceId", {}).get("videoId")
-                title = snippet.get("title", "Untitled")
-                pos = snippet.get("position", len(raw_items))
-                if v_id:
-                    raw_items.append((pos, v_id, title))
-
-            next_page_token = res.get("nextPageToken")
-            page_num += 1
-            if not next_page_token:
-                break
-
-    except HttpError as e:
-        status_code = e.resp.status if hasattr(e, "resp") else "Unknown"
-        if status_code == 404:
-            print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
-        elif status_code == 403:
-            print(f"[!] Error: Access forbidden (403). The playlist might be private or API quota was exceeded.\n    Details: {e}")
+    if pull_method in ("auto", "ytdlp"):
+        print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' using yt-dlp (0 Google API quota)...")
+        ytdlp_ids, ytdlp_titles = fetch_playlist_tracks_ytdlp(playlist_id, settings)
+        if ytdlp_ids is not None:
+            pulled_video_ids = ytdlp_ids
+            pulled_titles = ytdlp_titles
+            method_used = "yt-dlp"
         else:
-            print(f"[!] YouTube API Error ({status_code}): {e}")
-        return
+            if pull_method == "ytdlp":
+                print(f"[!] Error: Could not pull playlist tracks via yt-dlp. Make sure the playlist is public/unlisted.")
+                return
+            print(f"[*] yt-dlp could not access playlist tracks (it may be private). Falling back to YouTube API...")
 
-    # Ensure items are ordered by their actual position in the playlist
-    raw_items.sort(key=lambda x: x[0])
-    pulled_video_ids = [x[1] for x in raw_items]
-    pulled_titles = {x[1]: x[2] for x in raw_items}
+    if pulled_video_ids is None:
+        # Resolve which oauth-client JSON to use for this operation
+        oauth_client = _resolve_command_client(args)
+        youtube = get_youtube_service(oauth_client)
+        print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' via YouTube API...")
+
+        next_page_token = None
+        raw_items = []
+        page_num = 1
+        quota_units = 0
+
+        try:
+            while True:
+                print(f"    Fetching page {page_num}...")
+                res = youtube.playlistItems().list(
+                    part="snippet",
+                    playlistId=playlist_id,
+                    maxResults=50,
+                    pageToken=next_page_token
+                ).execute()
+                quota_units += 1  # 1 unit per playlistItems.list call
+
+                for item in res.get("items", []):
+                    snippet = item.get("snippet", {})
+                    v_id = snippet.get("resourceId", {}).get("videoId")
+                    title = snippet.get("title", "Untitled")
+                    pos = snippet.get("position", len(raw_items))
+                    if v_id:
+                        raw_items.append((pos, v_id, title))
+
+                next_page_token = res.get("nextPageToken")
+                page_num += 1
+                if not next_page_token:
+                    break
+
+        except HttpError as e:
+            status_code = e.resp.status if hasattr(e, "resp") else "Unknown"
+            if status_code == 404:
+                print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
+            elif status_code == 403:
+                print(f"[!] Error: Access forbidden (403). The playlist might be private or API quota was exceeded.\n    Details: {e}")
+            else:
+                print(f"[!] YouTube API Error ({status_code}): {e}")
+            return
+
+        # Ensure items are ordered by their actual position in the playlist
+        raw_items.sort(key=lambda x: x[0])
+        pulled_video_ids = [x[1] for x in raw_items]
+        pulled_titles = {x[1]: x[2] for x in raw_items}
+        pages_read = page_num - 1
+        method_used = "api"
+
+    # Diff calculation comparing existing local playlist vs pulled YouTube playlist
+    current_list = []
+    for vid in existing_video_ids:
+        title = existing_titles.get(vid, pulled_titles.get(vid, vid))
+        current_list.append({"videoId": vid, "title": title})
+
+    target_counts = {}
+    for vid in pulled_video_ids:
+        target_counts[vid] = target_counts.get(vid, 0) + 1
+
+    # 1. Deletions from local playlist (present locally, removed on YouTube)
+    deleted_count = 0
+    deleted_details = []
+    curr_counts = {}
+    for item in current_list:
+        v = item["videoId"]
+        curr_counts[v] = curr_counts.get(v, 0) + 1
+
+    for i in range(len(current_list) - 1, -1, -1):
+        item = current_list[i]
+        vid = item["videoId"]
+        target_allowed = target_counts.get(vid, 0)
+        if curr_counts.get(vid, 0) > target_allowed:
+            track_title = item.get("title", vid)
+            print(f"[-] Deleting track from local playlist: '{track_title}' ({vid})")
+            deleted_count += 1
+            deleted_details.append(f"- Removed: '{vid}' | {track_title}")
+            current_list.pop(i)
+            curr_counts[vid] -= 1
+
+    # 2. Insertions into local playlist (new tracks added on YouTube)
+    inserted_count = 0
+    inserted_details = []
+    active_counts = {}
+    for item in current_list:
+        v = item["videoId"]
+        active_counts[v] = active_counts.get(v, 0) + 1
+
+    target_seen_counts = {}
+    for pos, vid_id in enumerate(pulled_video_ids):
+        target_seen_counts[vid_id] = target_seen_counts.get(vid_id, 0) + 1
+        if target_seen_counts[vid_id] > active_counts.get(vid_id, 0):
+            track_title = pulled_titles.get(vid_id, vid_id)
+            print(f"[+] Inserting new track into local playlist at position {pos} ({vid_id})...")
+            item_info = {
+                "videoId": vid_id,
+                "title": track_title,
+                "position": pos
+            }
+            current_list.insert(pos, item_info)
+            active_counts[vid_id] = active_counts.get(vid_id, 0) + 1
+            inserted_count += 1
+            inserted_details.append(f"+ Inserted: '{vid_id}' | {track_title} (pos {pos})")
+            print(f"    [+] Inserted '{track_title}'")
+
+    # 3. Reordering in local playlist (tracks whose order changed on YouTube)
+    for idx, item in enumerate(current_list):
+        item["_id"] = idx
+    curr_item_ids = [item["_id"] for item in current_list]
+    target_item_ids = []
+    available_by_vid = {}
+    for item in current_list:
+        available_by_vid.setdefault(item["videoId"], []).append(item["_id"])
+    for vid in pulled_video_ids:
+        if vid in available_by_vid and available_by_vid[vid]:
+            target_item_ids.append(available_by_vid[vid].pop(0))
+
+    reorder_moves = compute_minimal_moves(curr_item_ids, target_item_ids)
+    moved_count = 0
+    moved_details = []
+
+    for item_id, target_pos in reorder_moves:
+        curr_ids = [it["_id"] for it in current_list]
+        from_idx = curr_ids.index(item_id)
+        item_info = current_list[from_idx]
+        vid_id = item_info["videoId"]
+        short_title = item_info["title"][:35]
+        print(f"[*] Moving '{short_title}...' -> position {target_pos} (from position {from_idx})")
+        moved_item = current_list.pop(from_idx)
+        moved_item["position"] = target_pos
+        current_list.insert(target_pos, moved_item)
+        moved_count += 1
+        moved_details.append(f"~ Reordered: '{vid_id}' | {item_info['title']} (pos {from_idx} -> pos {target_pos})")
+
+    if deleted_count == 0 and inserted_count == 0 and moved_count == 0:
+        print("[+] Local playlist is already up-to-date with YouTube.")
 
     if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above):
         return
@@ -246,24 +411,35 @@ def command_pull(args, settings, playlist_data):
     print("\n" + "=" * 60)
     print(" Pull Summary")
     print("=" * 60)
-    print(f"  * {'OAuth Client:':<22} {oauth_client}")
-    print(f"  * {'Tracks Fetched:':<22} {len(raw_items):>4d} track(s)")
-    print(f"  * {'Pages Read:':<22} {page_num - 1:>4d} request(s)")
-    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)      (1 unit/page)")
+    if method_used == "yt-dlp":
+        print(f"  * {'Method:':<22} yt-dlp (0 Google API quota)")
+    else:
+        print(f"  * {'OAuth Client:':<22} {oauth_client}")
+        print(f"  * {'Pages Read:':<22} {pages_read:>4d} request(s)")
+    print(f"  * {'Tracks Fetched:':<22} {len(pulled_video_ids):>4d} track(s)")
+    print(f"  * {'Deleted:':<22} {deleted_count:>4d} track(s)")
+    print(f"  * {'Inserted:':<22} {inserted_count:>4d} track(s)")
+    print(f"  * {'Reordered:':<22} {moved_count:>4d} track(s)")
+    quota_desc = f"{quota_units:>4d} unit(s)"
+    if method_used == "api":
+        quota_desc += "      (1 unit/page)"
+    print(f"  * {'API Quota Used:':<22} {quota_desc}")
     print("=" * 60)
-    print(f"[+] Successfully pulled {len(raw_items)} tracks to '{file_path}'!\n")
+    print(f"[+] Successfully pulled {len(pulled_video_ids)} tracks to '{file_path}'!\n")
     record_activity(playlist_data, playlist_name, "pull")
+    diff_details = deleted_details + inserted_details + moved_details
     log_playlist_event(
         settings,
         playlist_name,
         "pull",
-        oauth_client,
+        oauth_client if method_used == "api" else "yt-dlp",
         summary_lines=[
-            f"Fetched {len(raw_items)} track(s) across {page_num - 1} page(s) ({quota_units} quota units)"
+            f"Fetched {len(pulled_video_ids)} track(s) via {method_used} ({quota_units} quota units): "
+            f"{inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered"
         ],
+        detail_lines=diff_details if diff_details else ["No changes required (already in sync)"],
         playlist_data=playlist_data
     )
-
 
 def command_push(args, settings, playlist_data):
     """Pushes the local text file track order and changes to YouTube, then normalizes the local file."""
@@ -522,6 +698,8 @@ def command_push(args, settings, playlist_data):
 
 def command_format(args, settings, playlist_data):
     """Formats and cleans a local playlist file, converting any URLs/raw IDs to '<video_id> | <title>'."""
+    from .downloader import find_ytdlp, fetch_video_titles_ytdlp
+
     target_name = args.target.strip()
     playlist_name = get_playlist_name_for_target(target_name, playlist_data)
     safe_name = sanitize_filename(playlist_name)
@@ -538,27 +716,54 @@ def command_format(args, settings, playlist_data):
         print("[!] Error: No valid video IDs or URLs found in the file.")
         return
 
-    # Resolve which oauth-client JSON to use for this operation
-    oauth_client = _resolve_command_client(args)
-
-    # Check for missing titles and fetch them from YouTube API in batches of 50
     missing_ids = [v for v in target_video_ids if not target_video_titles.get(v)]
     quota_units = 0
+    oauth_client = None
+    method_used = "Local (all titles present)"
+
     if missing_ids:
-        print(f"[*] Fetching titles for {len(missing_ids)} tracks from YouTube API...")
-        try:
-            youtube = get_youtube_service(oauth_client)
-            for i in range(0, len(missing_ids), 50):
-                batch_ids = missing_ids[i:i + 50]
-                res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
-                quota_units += 1  # 1 unit per videos.list batch
-                for item in res.get("items", []):
-                    v_id = item["id"]
-                    v_title = item.get("snippet", {}).get("title", "").strip()
-                    if v_title:
-                        target_video_titles[v_id] = v_title
-        except Exception as e:
-            print(f"[!] Warning: Could not fetch some video titles from YouTube API: {e}")
+        ytdlp_bin = find_ytdlp(settings)
+        if ytdlp_bin:
+            print(f"[*] Fetching titles for {len(missing_ids)} track(s) using yt-dlp (0 Google API quota)...")
+            fetched = fetch_video_titles_ytdlp(missing_ids, settings)
+            for vid, title in fetched.items():
+                target_video_titles[vid] = title
+            method_used = "yt-dlp (0 API quota)"
+
+            # If any are still missing (e.g. yt-dlp couldn't extract some), check for cloud fallback
+            still_missing = [v for v in missing_ids if not target_video_titles.get(v)]
+            if still_missing:
+                print(f"[*] Falling back to YouTube Data API for {len(still_missing)} remaining title(s)...")
+                oauth_client = _resolve_command_client(args)
+                method_used = "yt-dlp + YouTube API"
+                try:
+                    youtube = get_youtube_service(oauth_client)
+                    for i in range(0, len(still_missing), 50):
+                        batch_ids = still_missing[i:i + 50]
+                        res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
+                        quota_units += 1
+                        for item in res.get("items", []):
+                            target_video_titles[item["id"]] = item.get("snippet", {}).get("title", "").strip()
+                except Exception as e:
+                    print(f"[!] Warning: YouTube API fallback failed: {e}")
+        else:
+            # yt-dlp not available, use YouTube Data API directly
+            oauth_client = _resolve_command_client(args)
+            method_used = "YouTube Data API"
+            print(f"[*] yt-dlp not found. Fetching titles for {len(missing_ids)} tracks from YouTube API...")
+            try:
+                youtube = get_youtube_service(oauth_client)
+                for i in range(0, len(missing_ids), 50):
+                    batch_ids = missing_ids[i:i + 50]
+                    res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
+                    quota_units += 1  # 1 unit per videos.list batch
+                    for item in res.get("items", []):
+                        v_id = item["id"]
+                        v_title = item.get("snippet", {}).get("title", "").strip()
+                        if v_title:
+                            target_video_titles[v_id] = v_title
+            except Exception as e:
+                print(f"[!] Warning: Could not fetch some video titles from YouTube API: {e}")
 
     resolved_titles = {}
     for vid_id in target_video_ids:
@@ -570,19 +775,21 @@ def command_format(args, settings, playlist_data):
     print("\n" + "=" * 60)
     print(" Format Summary")
     print("=" * 60)
-    print(f"  * {'OAuth Client:':<22} {oauth_client}")
+    print(f"  * {'Method:':<22} {method_used}")
+    if oauth_client:
+        print(f"  * {'OAuth Client:':<22} {oauth_client}")
     print(f"  * {'Tracks Normalized:':<22} {len(target_video_ids):>4d} track(s)")
     print(f"  * {'Titles Fetched:':<22} {len(missing_ids):>4d} track(s)")
-    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)      (1 unit/batch of 50)")
+    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)")
     print("=" * 60 + "\n")
     record_activity(playlist_data, playlist_name, "format")
     log_playlist_event(
         settings,
         playlist_name,
         "format",
-        oauth_client,
+        oauth_client or method_used,
         summary_lines=[
-            f"Normalized {len(target_video_ids)} track(s), fetched {len(missing_ids)} missing title(s) ({quota_units} quota units)"
+            f"Normalized {len(target_video_ids)} track(s), fetched {len(missing_ids)} missing title(s) ({quota_units} quota units via {method_used})"
         ],
         playlist_data=playlist_data
     )

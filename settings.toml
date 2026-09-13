@@ -1,0 +1,31 @@
+# ypm Global Settings
+
+# Prompts asking if you have pulled before confirming push. 
+safety_check_before_push = true
+
+# Max playlists in CLI menu ("all" to list all).
+menu_playlist_count = 3
+
+# Max OAuth clients in CLI menu ("all" to list all).
+menu_client_count = 3
+
+# Save log files for operations.
+enable_logging = true
+
+# Folder path for downloaded files.
+downloads_dir = "playlist-downloads"
+
+# Save links as full URLs instead of IDs. Run `format` to apply.
+clickable_links_in_playlist_files = false
+
+# Method to pull playlists ("auto", "ytdlp", "api").
+# Auto uses yt-dlp when possible and api as a fallback.
+pull_method = "auto"
+
+# Method to link playlists ("auto", "ytdlp", "api").
+# Auto uses yt-dlp when possible and api as a fallback.
+link_method = "auto"
+
+# Custom executable paths (blank = auto-detect).
+ytdlp_path = ""
+ffmpeg_path = ""

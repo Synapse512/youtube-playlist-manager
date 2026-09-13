@@ -30,7 +30,7 @@ cd youtube-playlist-manager
 pip install -r requirements.txt
 ```
 
-### 2. Google Cloud Setup
+### 2. Google Cloud Setup (*only if you manage playlists online*)
 1. Go to [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (or select an existing one).
 3. Enable the [YouTube Data API v3](https://console.cloud.google.com/marketplace/product/google/youtube.googleapis.com).
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 6. Go to **OAuth consent screen -> Audience -> Test Users**
    - Add the Google account email(s) tied to the playlists you want to manage
 
-### 3. OAuth Clients & Quota
+#### OAuth Clients & Quota
 
 An oauth-client JSON is just an OAuth client secret tied to a Google Cloud project's API quota - it is **not** a fixed user account. Each project gets its own daily quota, and any oauth-client file can be used to log into *any* Google account. Do not share these files, people can exploit your Google Cloud projects with the file info. 
 
@@ -71,13 +71,13 @@ youtube-playlist-manager/
 ├── playlists/
 │   ├── chill.txt        <- tracklist file
 │   └── instrumental.txt
-├── settings.json        <- user configuration preferences
+├── settings.toml        <- user configuration preferences
 └── logs/
     ├── chill.log        <- track changelog and operation history
     └── instrumental.log
 ```
 
-### 4. Usage
+### 3. Usage
 
 | Command | Syntax | Description |
 | --- | --- | --- |
@@ -87,15 +87,15 @@ youtube-playlist-manager/
 | **list** | `python main.py list` | Displays all configured playlists and last CLI edit timestamp/command |
 | **pull** | `python main.py pull [<name>] [--client <name>]` | Downloads the live YouTube playlist into `playlists/<name>.txt` |
 | **push** | `python main.py push [<name>] [--client <name>]` | Pushes local `.txt` additions, deletions, and track order to YouTube and automatically formats URLs/IDs to `<video_id> \| <video_title>` format |
-| **format** | `python main.py format [<name>] [--client <name>]` | Normalizes URLs/IDs into `<video_id> \| <title>` format for readability |
-| **download** | `python main.py download [<name>] [--format audio\|video]` | Downloads playlist as audio or video using `yt-dlp`. (Prompts for playlist and format if omitted) |
+| **format** | `python main.py format [<name>] [--client <name>]` | Normalizes URLs/IDs into `<video_id> \| <title>` format |
+| **download** | `python main.py download [<name>] [--format audio\|video]` | Downloads playlist as audio or video using `yt-dlp`. Audits disk and reconciles missing tracks automatically |
 | **help** | `python main.py help` | Displays help information with all command usages |
 
 For commands operating on a playlist (`pull`, `push`, `format`, `download`), the `<name>` param is optional. If omitted, it will be auto-selected if only 1 playlist exists, or you will be prompted with an interactive selection menu if multiple playlists exist. For `download`, if `--format` is omitted, you will be prompted to choose audio or video.
 
 `--client` / `-c` picks which oauth-client JSON to use for that single run. If omitted, it's auto-selected when only one exists, or you'll be prompted to choose when there are several. This choice is never saved - you pick fresh every time.
 
-### 5. Managing Playlists via Text Files
+### 4. Managing Playlists via Text Files
 
 The core workflow of `ypm` revolves around editing local `.txt` files in `playlists/<name>.txt`:
 
@@ -140,24 +140,12 @@ python main.py download
 
 You will be prompted to choose **audio** or **video** if you don't specify `--format audio|video`.
 
-- **Incremental downloads**: Only tracks not yet on disk are downloaded. Already-downloaded tracks are skipped automatically, so re-running the command is always safe.
-- **Track ordering**: When `"number_downloaded_files": true` in `settings.json`, every file is prefixed with its playlist position (e.g. `01 - Song.mp3`, `02 - Song.mp3`). This forces the correct sort order in your OS file manager or media player without relying on ID3/metadata. If you want to remove the numbered order from your installed playlist, simply toggle `"number_downloaded_files"` to `"true`, and re-run the `download` command, it will change the titles rather than redownload everything. 
-- **Archive file**: Each playlist download folder contains a hidden `.ytdlp_archive.txt`. This is how `yt-dlp` tracks what it has already fetched. It stays inside the playlist folder so the cache travels with the files if you move the folder.
+- **Filesystem-as-Truth & Self-Healing**: YPM audits the physical download folder before running. If you ever delete a track file from Windows Explorer or re-add a track to your text file, running `download` immediately detects that the file is missing on disk and downloads that track right back into place!
+- **Incremental downloads**: Only tracks not yet on disk are downloaded. Valid, existing tracks are skipped automatically, so re-running the command is always instant and safe.
+- **Track ordering**: When `"number_files": true` in `_setting.json`, every file is prefixed with its playlist position (e.g. `01 - Song.mp3`, `02 - Song.mp3`). This forces the correct sort order in your OS file manager or media player without relying on ID3/metadata. If you want to remove the numbered order, simply toggle `"number_files": false` in `_setting.json` and re-run `download` to instantly rename them without redownloading.
+- **Per-Playlist Settings**: Each playlist download directory contains `_setting.json`, storing that playlist's preferred format (`audio` or `video`), thumbnail options, numbering preference (`number_files`), and a track manifest mapping video IDs to filenames.
 
-### 6. Configuration (`settings.json`)
-
-You can edit `settings.json` directly in any text editor to configure defaults:
-
-- `"safety_check_before_push"`: `true` / `false` - Prompts for confirmation before pushing to YouTube to prevent overwriting recent changes.
-- `"menu_playlist_count"`: `<number>` / `"all"` - How many recent playlists to show in the menu, or `"all"` to list all.
-- `"menu_client_count"`: `<number>` / `"all"` - How many oauth clients to show in the menu, or `"all"` to list all.
-- `"enable_logging"`: `true` / `false` - Records per-playlist operation history in `logs/<name>.log` tracking additions, removals, and changes.
-- `"downloads_dir"`: `"<folder_path>"` - Root folder where downloaded playlists are saved (default: `"playlist-downloads"`).
-- `"number_downloaded_files"`: `true` / `false` - Whether to prefix downloaded track filenames with track numbers (e.g. `01 - Song.mp3`) matching their order in the playlist text file (default: `true`).
-- `"ytdlp_path"`: `"<executable_path>"` - Optional custom path to `yt-dlp.exe` (searches project root and PATH by default).
-- `"ffmpeg_path"`: `"<executable_path>"` - Optional custom path to `ffmpeg.exe` (searches project root and PATH by default).
-
-### 7. Quota Information
+### 5. Quota Information
 YouTube Data API v3 has a daily default quota of **10,000 units per Google Cloud project**, which amounts to about 200 operations of inserting, deleting, or reordering in a playlist. For more information go to [here](https://developers.google.com/youtube/v3/determine_quota_cost)
 
 | Operation | API Endpoint | Quota Cost |

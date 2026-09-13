@@ -261,14 +261,23 @@ def parse_playlist_file(file_path):
     return target_video_ids, target_video_titles, skipped_lines, blank_above
 
 
-def save_playlist_file(file_path, video_ids, video_titles, blank_above=None):
+def save_playlist_file(file_path, video_ids, video_titles, blank_above=None, clickable_links=None):
     """
     Rewrites the local playlist text file atomically with normalized format:
 
     # PULL BEFORE MAKING CHANGES
 
     <video_id> | <video_title>
+    or if clickable_links is True:
+    https://youtu.be/<video_id> | <video_title>
     """
+    if clickable_links is None:
+        try:
+            from .config import load_settings
+            clickable_links = load_settings().get("clickable_links_in_playlist_files", False)
+        except Exception:
+            clickable_links = False
+
     if blank_above is None:
         blank_above = set()
     elif not isinstance(blank_above, set):
@@ -279,7 +288,8 @@ def save_playlist_file(file_path, video_ids, video_titles, blank_above=None):
         if i > 0 and vid_id in blank_above:
             lines.append("")
         title = video_titles.get(vid_id) or "Untitled Video"
-        lines.append(f"{vid_id} | {title}")
+        prefix = f"https://youtu.be/{vid_id}" if clickable_links else vid_id
+        lines.append(f"{prefix} | {title}")
 
     temp_file = f"{file_path}.tmp"
     try:

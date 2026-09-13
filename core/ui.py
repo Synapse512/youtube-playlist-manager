@@ -130,32 +130,16 @@ OAuth Client Setup:
   oauth-client's project runs out of daily quota, just re-run the command with a
   different --client pointed at a project that still has quota left.
 
-Configuration (settings.json):
-  Edit 'settings.json' in any text editor to customize tool behavior:
-  - "safety_check_before_push": true | false
-      Prompts for confirmation before pushing to YouTube to prevent accidental overwrites. (Default: true)
-  - "menu_playlist_count": <number> | "all"
-      Number of playlists to show in the menu, or "all" to show all playlists. (Default: 3)
-  - "menu_client_count": <number> | "all"
-      Number of oauth clients to show in the menu, or "all" to show all of them. (Default: 3)
-  - "enable_logging": true | false
-      Records operation logs in 'logs/<name>.log' tracking additions, removals, and changes. (Default: true)
-  - "downloads_dir": "<folder_path>"
-      Root folder for yt-dlp playlist downloads. (Default: "playlist-downloads")
-  - "number_downloaded_files": true | false
-      Prefix filenames with track index (e.g. 01 - Song.mp3) matching text file order. (Default: true)
-  - "ytdlp_path": "<executable_path>"
-      Custom path to yt-dlp.exe (optional; searches project root and PATH by default).
-  - "ffmpeg_path": "<executable_path>"
-      Custom path to ffmpeg.exe (optional; searches project root and PATH by default).
+Configuration:
+  Edit 'settings.toml' in any text editor to customize behavior. Every setting is documented directly in the file.
 
 Commands:
   menu          python main.py
                 Displays the welcome menu, recent playlists, and configured oauth clients.
 
-  link          python main.py link <id_or_url> [--client <name>]
-                Connects a YouTube Playlist ID or URL using the title fetched from YouTube
-                (prompts to choose an oauth client if multiple exist and --client is omitted).
+  link          python main.py link <id_or_url> [--method auto|ytdlp|api] [--client <name>]
+                Connects a YouTube Playlist ID or URL using the title fetched from YouTube.
+                Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
 
   unlink        python main.py unlink <name>
                 Removes a linked playlist.
@@ -163,8 +147,9 @@ Commands:
   list          python main.py list
                 Displays all configured playlists with their last CLI edit info.
 
-  pull          python main.py pull [<name>] [--client <name>]
-                Downloads the live YouTube playlist into playlists/<name>.txt
+  pull          python main.py pull [<name>] [--method auto|ytdlp|api] [--client <name>]
+                Downloads the live YouTube playlist into playlists/<name>.txt.
+                Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
                 (prompts to select playlist if omitted and multiple exist).
 
   push          python main.py push [<name>] [--client <name>]
@@ -173,7 +158,8 @@ Commands:
                 (prompts to select playlist if omitted and multiple exist).
 
   format        python main.py format [<name>] [--client <name>]
-                Normalizes URLs/IDs into <video_id> | <title> format for readability
+                Normalizes URLs/IDs into <video_id> | <title> format for readability.
+                Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
                 (prompts to select playlist if omitted and multiple exist).
 
   download      python main.py download [<name>] [--format audio|video]
@@ -187,6 +173,7 @@ Commands:
                 Displays this help message with all command usages.
 
 Options:
+  --method, -m  Select operation method: 'auto' (yt-dlp with API fallback), 'ytdlp' (0 quota), or 'api' (OAuth).
   --client, -c  Specify which oauth-client JSON to use (must match a file in
                 oauth-clients/<name>.json). If omitted: auto-selected if only 1
                 oauth client exists, or prompted if multiple exist. This is never

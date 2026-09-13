@@ -15,6 +15,13 @@ from core.ui import show_menu, print_help, dispatch_command
 
 def main():
     try:
+        if hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8")
+                sys.stderr.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
         settings = load_settings()
         playlist_data = load_playlist_data()
 
@@ -38,6 +45,7 @@ def main():
         link_parser = subparsers.add_parser("link", add_help=False)
         link_parser.add_argument("target", nargs="?", metavar="ID_OR_URL")
         link_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        link_parser.add_argument("--method", "-m", choices=["auto", "ytdlp", "api"], default=None, help="Link method: auto (default), ytdlp (0 quota), or api (OAuth)")
         link_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: unlink
@@ -53,6 +61,7 @@ def main():
         pull_parser = subparsers.add_parser("pull", add_help=False)
         pull_parser.add_argument("target", nargs="?")
         pull_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        pull_parser.add_argument("--method", "-m", choices=["auto", "ytdlp", "api"], default=None, help="Pull method: auto (default), ytdlp (0 quota), or api (OAuth)")
         pull_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: push
