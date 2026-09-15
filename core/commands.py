@@ -38,7 +38,7 @@ def _resolve_command_client(args):
 
 
 def command_link(args, settings, playlist_data):
-    """Links a YouTube playlist to data/playlists.json using the title fetched from YouTube."""
+    """Links a YouTube playlist to playlists/_playlists.json using the title fetched from YouTube."""
     from .downloader import (
         fetch_playlist_title_ytdlp,
         DOWNLOAD_SETTINGS_FILENAME,
@@ -134,7 +134,6 @@ def command_link(args, settings, playlist_data):
         existing = load_playlist_download_settings(playlist_download_dir)
         if not existing:
             default_settings = {
-                "format": "audio",
                 "embed_thumbnail": True,
                 "number_files": True,
                 "tracks": {}
@@ -157,7 +156,7 @@ def command_link(args, settings, playlist_data):
 
 
 def command_unlink(args, settings, playlist_data):
-    """Removes a linked playlist from data/playlists.json."""
+    """Removes a linked playlist from playlists/_playlists.json."""
     name = args.name.strip()
     playlists = playlist_data.get("playlists", {})
 
@@ -303,10 +302,23 @@ def command_pull(args, settings, playlist_data):
 
         except HttpError as e:
             status_code = e.resp.status if hasattr(e, "resp") else "Unknown"
-            if status_code == 404:
-                print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
-            elif status_code == 403:
+            if "quotaExceeded" in str(e) or status_code == 403:
                 print(f"[!] Error: Access forbidden (403). The playlist might be private or API quota was exceeded.\n    Details: {e}")
+                record_activity(playlist_data, playlist_name, "pull (quota exceeded)")
+                log_playlist_event(
+                    settings,
+                    playlist_name,
+                    "pull (ABANDONED - QUOTA EXCEEDED)",
+                    oauth_client,
+                    summary_lines=[
+                        "Pull operation abandoned: YouTube API quota exceeded or 403 forbidden",
+                        f"{quota_units} quota unit(s) consumed prior to abandonment"
+                    ],
+                    detail_lines=[f"Details: {e}"],
+                    playlist_data=playlist_data
+                )
+            elif status_code == 404:
+                print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
             else:
                 print(f"[!] YouTube API Error ({status_code}): {e}")
             return
@@ -508,6 +520,22 @@ def command_push(args, settings, playlist_data):
                 break
 
     except HttpError as e:
+        if "quotaExceeded" in str(e) or (hasattr(e, "resp") and e.resp.status == 403):
+            print("\n[!] YouTube API daily quota limit reached while reading playlist.")
+            record_activity(playlist_data, playlist_name, "push (quota exceeded)")
+            log_playlist_event(
+                settings,
+                playlist_name,
+                "push (ABANDONED - QUOTA EXCEEDED)",
+                oauth_client,
+                summary_lines=[
+                    "Push abandoned: YouTube API daily quota limit reached during initial track fetch",
+                    f"{list_units} list request(s) completed before quota exhaustion"
+                ],
+                detail_lines=[f"Error: {e}"],
+                playlist_data=playlist_data
+            )
+            return
         print(f"[!] YouTube API Error while fetching current playlist: {e}")
         return
 
@@ -520,11 +548,55 @@ def command_push(args, settings, playlist_data):
     for vid in target_video_ids:
         target_counts[vid] = target_counts.get(vid, 0) + 1
 
-    # 1. Delete videos removed locally (iterate backwards to keep list indices valid)
     deleted_count = 0
+    inserted_count = 0
+    moved_count = 0
     deleted_details = []
     inserted_details = []
     moved_details = []
+
+    def _handle_quota_exceeded(phase_name):
+        list_q = list_units * 1
+        del_q = deleted_count * 50
+        ins_q = inserted_count * 50
+        upd_q = moved_count * 50
+        total_q = list_q + del_q + ins_q + upd_q
+
+        print("\n" + "=" * 60)
+        print(" [!] YouTube API Daily Quota Exceeded")
+        print("=" * 60)
+        print(f"  * Operation abandoned during: {phase_name}")
+        print(f"  * Total quota consumed:       {total_q} unit(s)")
+        print(f"  * Successfully deleted:       {deleted_count} track(s)")
+        print(f"  * Successfully inserted:      {inserted_count} track(s)")
+        print(f"  * Successfully reordered:     {moved_count} track(s)")
+        print("=" * 60)
+        print("  Wait for your daily quota to reset or use another --client.")
+        print(f"  (This abandoned operation has been logged to logs/{sanitize_filename(playlist_name)}.log)\n")
+
+        # Update local file to preserve YouTube's partial state if any changes occurred
+        if deleted_count > 0 or inserted_count > 0 or moved_count > 0:
+            partial_vids = [it["videoId"] for it in current_list if it.get("videoId")]
+            partial_titles = {it["videoId"]: it.get("title", "") for it in current_list if it.get("videoId")}
+            save_playlist_file(file_path, partial_vids, partial_titles, blank_above=blank_above)
+            print(f"[*] Updated local file '{file_path}' to match YouTube's current state.")
+
+        record_activity(playlist_data, playlist_name, "push (quota exceeded)")
+        diff_d = deleted_details + inserted_details + moved_details
+        log_playlist_event(
+            settings,
+            playlist_name,
+            "push (ABANDONED - QUOTA EXCEEDED)",
+            oauth_client,
+            summary_lines=[
+                f"Push abandoned: YouTube API daily quota limit reached during {phase_name}",
+                f"Partial progress: {inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered ({total_q} quota units used)"
+            ],
+            detail_lines=diff_d if diff_d else [f"Quota limit reached during {phase_name} before any modifications were made."],
+            playlist_data=playlist_data
+        )
+
+    # 1. Delete videos removed locally (iterate backwards to keep list indices valid)
     sync_failed = False
     curr_counts = {}
     for item in current_list:
@@ -546,12 +618,13 @@ def command_push(args, settings, playlist_data):
                 current_list.pop(i)
                 curr_counts[vid] -= 1
             except HttpError as e:
+                if "quotaExceeded" in str(e):
+                    _handle_quota_exceeded("deletion phase")
+                    return
                 print(f"[!] Error deleting track {vid}: {e}")
                 sync_failed = True
 
     # 2. Add new tracks present locally at their exact target positions
-    inserted_count = 0
-    # Track existing counts in current list
     active_counts = {}
     for item in current_list:
         v = item["videoId"]
@@ -588,8 +661,7 @@ def command_push(args, settings, playlist_data):
                 print(f"    [+] Inserted '{item_info['title']}'")
             except HttpError as e:
                 if "quotaExceeded" in str(e):
-                    print("\n[!] YouTube API daily quota limit reached (~200 updates/day).")
-                    print("Run this script again tomorrow to continue!")
+                    _handle_quota_exceeded("insertion phase")
                     return
                 print(f"    [!] Error inserting {vid_id}: {e}")
                 sync_failed = True
@@ -613,7 +685,6 @@ def command_push(args, settings, playlist_data):
     curr_item_ids = [item["playlistItemId"] for item in current_list]
 
     reorder_moves = compute_minimal_moves(curr_item_ids, target_item_ids)
-    moved_count = 0
 
     for item_id, target_pos in reorder_moves:
         curr_ids = [it["playlistItemId"] for it in current_list]
@@ -642,8 +713,7 @@ def command_push(args, settings, playlist_data):
             moved_details.append(f"~ Reordered: '{vid_id}' | {item_info['title']} (pos {from_idx} -> pos {target_pos})")
         except HttpError as e:
             if "quotaExceeded" in str(e):
-                print("\n[!] YouTube API daily quota limit reached")
-                print("Wait for your quota to reset before running again")
+                _handle_quota_exceeded("reordering phase")
                 return
             print(f"[!] Error moving track {vid_id}: {e}")
 

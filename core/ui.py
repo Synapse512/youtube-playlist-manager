@@ -3,9 +3,11 @@ Terminal UI, dashboard menu, interactive oauth-client display, and help output.
 """
 
 import sys
+import os
 
-from .config import VERSION
+from .config import VERSION, PLAYLISTS_DIR
 from .auth import get_oauth_clients
+from .parser import sanitize_filename
 
 
 def terminal_link(text, url):
@@ -17,6 +19,13 @@ def show_menu(settings, playlist_data, parser=None):
     """Displays the welcome menu with recent playlists and quick actions."""
     playlists = playlist_data.get("playlists", {})
     activity = playlist_data.get("activity", {})
+
+    # Filter out playlists whose local text file does not exist on disk
+    visible_playlists = {
+        name: pid for name, pid in playlists.items()
+        if os.path.isfile(os.path.join(PLAYLISTS_DIR, f"{name}.txt")) or
+           os.path.isfile(os.path.join(PLAYLISTS_DIR, f"{sanitize_filename(name)}.txt"))
+    }
 
     print("\n" + "=" * 70)
     print(f"ypm - Dashboard - V{VERSION}".center(70))
@@ -33,7 +42,7 @@ def show_menu(settings, playlist_data, parser=None):
 
     # Rank playlists by interaction count (descending), then by last_time (descending)
     ranked_playlists = sorted(
-        playlists.keys(),
+        visible_playlists.keys(),
         key=lambda a: (
             activity.get(a, {}).get("count", 0),
             activity.get(a, {}).get("last_time", "")
@@ -47,11 +56,11 @@ def show_menu(settings, playlist_data, parser=None):
     if menu_limit != 0:
         print("\n  [*] Recent Playlists:")
         has_shown_section = True
-        if not playlists:
+        if not visible_playlists:
             print("      No playlists configured yet.\n")
         else:
             for idx, p_name in enumerate(recent_playlists, 1):
-                pid = playlists[p_name]
+                pid = visible_playlists[p_name]
                 url = f"https://www.youtube.com/playlist?list={pid}"
 
                 act = activity.get(p_name, {})

@@ -6,7 +6,7 @@ import os
 import re
 from urllib.parse import urlparse, parse_qs
 
-from .config import load_playlist_data
+from .config import load_playlist_data, PLAYLISTS_DIR
 
 
 def extract_video_id(input_str):
@@ -143,9 +143,17 @@ def resolve_target_playlist(target_name=None, playlist_data=None, allow_prompt=F
         import sys
         sys.exit(1)
 
+    # Prioritize playlists whose local text file exists on disk (unless command is pull or none exist)
+    existing_file_playlists = [
+        k for k in playlists.keys()
+        if os.path.isfile(os.path.join(PLAYLISTS_DIR, f"{k}.txt")) or
+           os.path.isfile(os.path.join(PLAYLISTS_DIR, f"{sanitize_filename(k)}.txt"))
+    ]
+    candidate_keys = existing_file_playlists if (existing_file_playlists and command_name != "pull") else list(playlists.keys())
+
     # Sort playlists by recent activity (count, last_time) descending, then by name
     ranked_playlists = sorted(
-        playlists.keys(),
+        candidate_keys,
         key=lambda a: (
             activity.get(a, {}).get("count", 0),
             activity.get(a, {}).get("last_time", "")

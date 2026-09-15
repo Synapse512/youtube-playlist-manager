@@ -788,7 +788,7 @@ def command_download(args, settings, playlist_data, fmt=None):
         fmt = resolve_download_format(fmt, allow_prompt=False)
         saved_dl_settings["format"] = fmt
         save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
-    elif "format" in saved_dl_settings:
+    elif saved_dl_settings.get("format"):
         fmt = saved_dl_settings["format"]
         print(f"[*] Using saved playlist format: '{fmt}' (from {DOWNLOAD_SETTINGS_FILENAME})")
     else:

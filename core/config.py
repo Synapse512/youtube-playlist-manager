@@ -19,9 +19,9 @@ VERSION = "1.1.2"
 
 SETTINGS_FILE = "settings.toml"
 DATA_DIR = "data"
-PLAYLISTS_DATA_FILE = os.path.join(DATA_DIR, "playlists.json")
-OAUTH_CLIENTS_DIR = "oauth-clients"
 PLAYLISTS_DIR = "playlists"
+PLAYLISTS_DATA_FILE = os.path.join(PLAYLISTS_DIR, "_playlists.json")
+OAUTH_CLIENTS_DIR = "oauth-clients"
 LOGS_DIR = "logs"
 DOWNLOADS_DIR = "playlist-downloads"
 
@@ -140,8 +140,8 @@ def save_settings(settings):
 
 
 def load_playlist_data():
-    """Loads data/playlists.json containing linked playlists and activity tracking."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    """Loads playlists/_playlists.json containing linked playlists and activity tracking."""
+    os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     default_data = {
         "playlists": {},
         "activity": {}
@@ -156,10 +156,6 @@ def load_playlist_data():
             data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("Playlist data file must contain a JSON object.")
-            # Drop the legacy per-playlist account association; oauth clients are
-            # no longer tied to a specific playlist.
-            if "playlist_users" in data:
-                del data["playlist_users"]
             should_save = any(k not in data for k in default_data)
             data.setdefault("playlists", {})
             data.setdefault("activity", {})
@@ -179,8 +175,8 @@ def load_playlist_data():
 
 
 def save_playlist_data(data):
-    """Saves playlist data dictionary to data/playlists.json atomically."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    """Saves playlist data dictionary to playlists/_playlists.json atomically."""
+    os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     temp_file = f"{PLAYLISTS_DATA_FILE}.tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:

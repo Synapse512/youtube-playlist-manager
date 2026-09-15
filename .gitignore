@@ -2,11 +2,7 @@
 oauth-clients/*
 !oauth-clients/.gitkeep
 
-# Local playlist data
-data/playlists.json
-!data/.gitkeep
-
-# Local playlist tracklists
+# Local playlist tracklists & playlists.json
 playlists/*
 !playlists/.gitkeep
 

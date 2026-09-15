@@ -4,10 +4,10 @@
 safety_check_before_push = true
 
 # Max playlists in CLI menu ("all" to list all).
-menu_playlist_count = 3
+menu_playlist_count = "all"
 
 # Max OAuth clients in CLI menu ("all" to list all).
-menu_client_count = 3
+menu_client_count = "all"
 
 # Save log files for operations.
 enable_logging = true
@@ -16,7 +16,7 @@ enable_logging = true
 downloads_dir = "playlist-downloads"
 
 # Save links as full URLs instead of IDs. Run `format` to apply.
-clickable_links_in_playlist_files = false
+clickable_links_in_playlist_files = true
 
 # Method to pull playlists ("auto", "ytdlp", "api").
 # Auto uses yt-dlp when possible and api as a fallback.
