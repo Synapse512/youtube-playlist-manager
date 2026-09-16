@@ -32,7 +32,7 @@ python main.py pull
 python main.py download
 ```
 
-Google Cloud only comes into play later, if you want to do the two things `yt-dlp` can't do on its own: push local edits back to YouTube, or work with a private playlist. That's covered later.
+Google Cloud only comes into play later, if you want to do the two things `yt-dlp` can't do on its own: push local edits back to YouTube, or work with a private playlist. Information is provided further into the readme.
 
 ## Project layout
 
@@ -146,4 +146,4 @@ See the [quota documentation](https://developers.google.com/youtube/v3/determine
 
 ---
 
-Note: I wrote the code in this project with Google Antigravity, mostly because I was in a rush to get this into a usable state, but also because Python is not my specialty. I have run many different tests using real oauth clients and large playlists (400+ videos), and did not encounter any issues, and all safety fallbacks worked as they should.
+Note: I wrote the code in this project with Google Antigravity, mostly because I was in a rush to get this into a usable state, but also because Python is not my specialty. I have run many different tests using real oauth clients and large playlists (700+ videos), and did not encounter any issues, all features and safety fallbacks work as they should. 
