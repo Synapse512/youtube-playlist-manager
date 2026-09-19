@@ -5,6 +5,8 @@ oauth-clients/*
 # Local playlist tracklists & playlists.json
 playlists/*
 !playlists/.gitkeep
+data
+!data/.gitkeep
 
 # Local operation logs
 logs/*

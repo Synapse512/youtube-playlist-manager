@@ -6,7 +6,88 @@ import os
 import re
 from urllib.parse import urlparse, parse_qs
 
-from .config import load_playlist_data, PLAYLISTS_DIR
+from .config import (
+    load_playlist_data,
+    PLAYLISTS_DIR,
+    ENTRY_SEPARATOR,
+    DEFAULT_PLAYLIST_ENTRY_FORMAT,
+    normalize_playlist_entry_format,
+    playlist_entry_format_fields,
+)
+
+ENTRY_METADATA_DEFAULTS = {
+    "id": "",
+    "title": "",
+    "channel": "",
+    "duration": "",
+}
+
+
+def _playlist_name_from_file_path(file_path):
+    return os.path.splitext(os.path.basename(file_path))[0]
+
+
+def _load_entry_format_for_file(file_path):
+    """Looks up playlist_entry_format for playlists/<name>.txt from playlist-settings.toml."""
+    try:
+        from .config import load_all_playlist_settings
+        entry = load_all_playlist_settings().get(_playlist_name_from_file_path(file_path), {})
+        if isinstance(entry, dict):
+            return normalize_playlist_entry_format(entry.get("playlist_entry_format"))
+    except Exception:
+        pass
+    return DEFAULT_PLAYLIST_ENTRY_FORMAT
+
+
+def parse_playlist_entry_line(line_str, entry_format=None):
+    """
+    Parses one video line according to playlist_entry_format.
+    Returns (video_id_or_None, metadata_dict).
+
+    Fields are separated by "|" in the order given by the format (id always first).
+    Titles may themselves contain "|": when a line has more parts than the format
+    has fields, the surplus is folded back into the title. Lines with fewer parts
+    (e.g. a bare URL or ID) simply leave the remaining fields empty.
+    """
+    fields = playlist_entry_format_fields(entry_format)
+    parts = [p.strip() for p in line_str.split("|")]
+
+    # Drop trailing empty parts beyond what the format expects (e.g. "id | title |  |  | ")
+    while len(parts) > len(fields) and parts[-1] == "":
+        parts.pop()
+
+    values = {}
+    if len(parts) <= len(fields) or "title" not in fields:
+        for field, part in zip(fields, parts):
+            values[field] = part
+    else:
+        title_idx = fields.index("title")
+        after = fields[title_idx + 1:]
+        title_end = len(parts) - len(after)
+        for field, part in zip(fields[:title_idx], parts[:title_idx]):
+            values[field] = part
+        values["title"] = ENTRY_SEPARATOR.join(parts[title_idx:title_end])
+        for field, part in zip(after, parts[title_end:]):
+            values[field] = part
+
+    metadata = dict(ENTRY_METADATA_DEFAULTS)
+    metadata.update({k: v for k, v in values.items() if k != "id"})
+
+    id_candidate = parts[0] if parts else ""
+    vid_id = extract_video_id(id_candidate)
+    metadata["id"] = vid_id or id_candidate
+    return vid_id, metadata
+
+
+def _format_playlist_entry_line(vid_id, metadata, entry_format=None):
+    """Builds one playlist text line: fields in the configured order, joined by ' | '."""
+    values = dict(ENTRY_METADATA_DEFAULTS)
+    values.update(metadata or {})
+    values["id"] = vid_id
+    cells = []
+    for field in playlist_entry_format_fields(entry_format):
+        cells.append(" ".join(str(values.get(field) or "").split()))
+    return ENTRY_SEPARATOR.join(cells).rstrip()
 
 
 def extract_video_id(input_str):
@@ -215,69 +296,192 @@ def resolve_target_playlist(target_name=None, playlist_data=None, allow_prompt=F
     sys.exit(1)
 
 
-def parse_playlist_file(file_path):
+from typing import NamedTuple
+
+
+class PlaylistParseResult(NamedTuple):
+    video_ids: list
+    video_titles: dict
+    skipped_lines: int
+    blank_above: set
+    sections_data: dict
+
+
+def parse_header_line(line):
     """
-    Parses a local playlist text file.
+    Parses a '## ...' header line into a dictionary:
+    {
+        "playlist_id": Optional[str],
+        "url": Optional[str],
+        "title": str,
+        "raw": str
+    }
+    Supports:
+      - '## https://www.youtube.com/playlist?list=PLxyz | Title'
+      - '## PLxyz | Title'
+      - '## https://www.youtube.com/playlist?list=PLxyz'
+      - '## PLxyz'
+      - '## Section Title Without Link'
+    """
+    raw = line.strip()
+    content = raw.lstrip("#").strip()
+    _PLAYLIST_PREFIXES = ("PL", "UU", "FL", "LL", "RD", "OL", "VL", "CL", "TL")
+    if "|" in content:
+        parts = content.split("|", 1)
+        left = parts[0].strip()
+        title = parts[1].strip()
+        pid = extract_playlist_id(left)
+        if pid and (pid != left or pid.startswith(_PLAYLIST_PREFIXES)):
+            url = left if "://" in left else f"https://www.youtube.com/playlist?list={pid}"
+            return {"playlist_id": pid, "url": url, "title": title, "raw": raw}
+        elif "youtube.com" in left or "youtu.be" in left:
+            url = left if "://" in left else f"https://{left}"
+            return {"playlist_id": pid, "url": url, "title": title, "raw": raw}
+        else:
+            return {"playlist_id": None, "url": None, "title": content, "raw": raw}
+    else:
+        pid = extract_playlist_id(content)
+        if pid and (pid != content or content.startswith(_PLAYLIST_PREFIXES)):
+            url = content if "://" in content else f"https://www.youtube.com/playlist?list={pid}"
+            return {"playlist_id": pid, "url": url, "title": "", "raw": raw}
+        elif "youtube.com" in content or "youtu.be" in content:
+            url = content if "://" in content else f"https://{content}"
+            return {"playlist_id": pid, "url": url, "title": "", "raw": raw}
+        else:
+            return {"playlist_id": None, "url": None, "title": content, "raw": raw}
+
+
+def parse_playlist_file(file_path, entry_format=None):
+    """
+    Parses a local playlist text file supporting section headers.
     Supports lines formatted as:
-      - '<video_id> | <title>'
-      - '<video_url> | <title>'
-      - '<video_id>'
-      - '<video_url>'
-    Ignores empty lines and comments (lines starting with '#').
-    Returns (target_video_ids, target_video_titles, skipped_lines, blank_above).
-    blank_above is a set of video IDs that had at least one blank line above them.
+      - '## <link | title>' or '## <title>' (section / main headers)
+      - video lines laid out by the playlist's playlist_entry_format
+        (e.g. '<video_id> | <title> | <channel> | <duration>'); the ID may also be a URL
+      - '<video_id>' / '<video_url>' on its own
+    Ignores single '#' comments and empty lines.
+    Returns PlaylistParseResult(target_video_ids, target_video_titles, skipped_lines, blank_above, sections_data).
     """
     target_video_ids = []
     target_video_titles = {}
+    video_metadata = {}
     skipped_lines = 0
     blank_above = set()
     first_song_seen = False
     blank_pending = False
 
+    main_header = None
+    sections = []
+    current_section = None
+    first_header = True
+    entry_format = normalize_playlist_entry_format(entry_format) if entry_format else _load_entry_format_for_file(file_path)
+
     with open(file_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                if first_song_seen:
-                    blank_pending = True
+            line_str = line.strip()
+            if not line_str:
+                blank_pending = True
                 continue
 
-            if line.startswith("#"):
+            # Header line (starts with ##)
+            if line_str.startswith("##"):
+                hdr = parse_header_line(line_str)
+                header_blank_above = blank_pending
+                if first_header and not first_song_seen:
+                    # Top-level main playlist header
+                    main_header = hdr
+                    main_header["blank_above"] = header_blank_above
+                    first_header = False
+                    current_section = {
+                        "title": hdr.get("title") or "Main",
+                        "playlist_id": hdr.get("playlist_id"),
+                        "url": hdr.get("url"),
+                        "video_ids": [],
+                        "blank_above": set(),
+                        "header_blank_above": False,
+                        "is_implicit": True,
+                    }
+                else:
+                    first_header = False
+                    if current_section and (current_section["video_ids"] or not current_section.get("is_implicit")):
+                        sections.append(current_section)
+                    current_section = {
+                        "title": hdr.get("title", "").strip(),
+                        "playlist_id": hdr.get("playlist_id"),
+                        "url": hdr.get("url"),
+                        "video_ids": [],
+                        "blank_above": set(),
+                        "header_blank_above": header_blank_above,
+                        "is_implicit": False,
+                    }
+
+                blank_pending = False
                 continue
 
-            if "|" in line:
-                parts = line.split("|", 1)
-                id_candidate = parts[0].strip()
-                title_candidate = parts[1].strip()
-            else:
-                id_candidate = line.strip()
-                title_candidate = ""
+            # Comments (single #)
+            if line_str.startswith("#"):
+                continue
 
-            vid_id = extract_video_id(id_candidate)
+            vid_id, metadata = parse_playlist_entry_line(line_str, entry_format)
             if vid_id:
                 target_video_ids.append(vid_id)
+                video_metadata[vid_id] = metadata
+                title_candidate = metadata.get("title", "")
                 if title_candidate:
                     target_video_titles[vid_id] = title_candidate
                 if blank_pending:
                     blank_above.add(vid_id)
+                    if current_section:
+                        current_section["blank_above"].add(vid_id)
                     blank_pending = False
+                if current_section is None:
+                    current_section = {
+                        "title": "Main",
+                        "playlist_id": None,
+                        "url": None,
+                        "video_ids": [],
+                        "blank_above": set(),
+                        "header_blank_above": False,
+                        "is_implicit": True,
+                    }
+                current_section["video_ids"].append(vid_id)
                 first_song_seen = True
             else:
+                id_candidate = metadata.get("id", line_str)
                 print(f"    [!] Line {line_num}: Skipping unparseable video ID or URL: '{id_candidate}'")
                 skipped_lines += 1
 
-    return target_video_ids, target_video_titles, skipped_lines, blank_above
+    if current_section and (current_section["video_ids"] or not current_section.get("is_implicit")):
+        sections.append(current_section)
+
+    explicit_sections = [s for s in sections if not s.get("is_implicit")]
+    is_sectioned = len(explicit_sections) > 0
+
+    sections_data = {
+        "main_header": main_header,
+        "is_sectioned": is_sectioned,
+        "sections": sections,
+        "video_metadata": video_metadata,
+    }
+
+    return PlaylistParseResult(
+        target_video_ids,
+        target_video_titles,
+        skipped_lines,
+        blank_above,
+        sections_data
+    )
 
 
-def save_playlist_file(file_path, video_ids, video_titles, blank_above=None, clickable_links=None):
+def save_playlist_file(file_path, video_ids, video_titles, blank_above=None, clickable_links=None, sections_data=None, main_header=None, video_metadata=None, playlist_entry_format=None):
     """
     Rewrites the local playlist text file atomically with normalized format:
 
-    # PULL BEFORE MAKING CHANGES
+    ## <playlist_url> | <playlist_title>
 
-    <video_id> | <video_title>
-    or if clickable_links is True:
-    https://youtu.be/<video_id> | <video_title>
+    followed by track list or sections:
+    ## <section_url> | <section_title>
+    <video_id> | <video_title> | ...   (fields per the playlist's playlist_entry_format)
     """
     if clickable_links is None:
         try:
@@ -291,18 +495,95 @@ def save_playlist_file(file_path, video_ids, video_titles, blank_above=None, cli
     elif not isinstance(blank_above, set):
         blank_above = set(blank_above)
 
-    lines = ["# PULL BEFORE MAKING CHANGES", ""]
-    for i, vid_id in enumerate(video_ids):
-        if i > 0 and vid_id in blank_above:
-            lines.append("")
-        title = video_titles.get(vid_id) or "Untitled Video"
-        prefix = f"https://youtu.be/{vid_id}" if clickable_links else vid_id
-        lines.append(f"{prefix} | {title}")
+    if video_metadata is None:
+        video_metadata = {}
+    if sections_data and isinstance(sections_data.get("video_metadata"), dict):
+        merged_metadata = dict(sections_data.get("video_metadata", {}))
+        merged_metadata.update(video_metadata)
+        video_metadata = merged_metadata
+
+    if playlist_entry_format is None:
+        playlist_entry_format = _load_entry_format_for_file(file_path)
+    playlist_entry_format = normalize_playlist_entry_format(playlist_entry_format)
+
+    # Determine main header line
+    header_line = None
+    hdr = main_header or (sections_data.get("main_header") if sections_data else None)
+    if hdr:
+        pid = hdr.get("playlist_id")
+        title = hdr.get("title") or ""
+        url = hdr.get("url") or (f"https://www.youtube.com/playlist?list={pid}" if pid else None)
+        if url and title:
+            header_line = f"## {url} | {title}"
+        elif url:
+            header_line = f"## {url}"
+        elif title:
+            header_line = f"## {title}"
+        else:
+            header_line = hdr.get("raw") or "## Playlist"
+    else:
+        basename = os.path.splitext(os.path.basename(file_path))[0]
+        try:
+            from .config import load_playlist_data
+            pdata = load_playlist_data()
+            pid = pdata.get("playlists", {}).get(basename)
+            if pid:
+                header_line = f"## https://www.youtube.com/playlist?list={pid} | {basename}"
+            else:
+                header_line = f"## {basename}"
+        except Exception:
+            header_line = f"## {basename}"
+
+    lines = [header_line, ""]
+
+    if sections_data and sections_data.get("is_sectioned") and sections_data.get("sections"):
+        for sec in sections_data["sections"]:
+            sec_vids = sec.get("video_ids", [])
+            if not sec.get("is_implicit"):
+                if sec.get("header_blank_above") and lines and lines[-1] != "":
+                    lines.append("")
+
+                pid = sec.get("playlist_id")
+                title = sec.get("title", "").strip()
+                url = sec.get("url") or (f"https://www.youtube.com/playlist?list={pid}" if pid else None)
+                if url and title and title != pid:
+                    sec_hdr = f"## {url} | {title}"
+                elif url:
+                    sec_hdr = f"## {url}"
+                elif pid and title and title != pid:
+                    sec_hdr = f"## https://www.youtube.com/playlist?list={pid} | {title}"
+                elif pid:
+                    sec_hdr = f"## https://www.youtube.com/playlist?list={pid}"
+                else:
+                    sec_hdr = f"## {title or 'Section'}"
+
+                lines.append(sec_hdr)
+
+            sec_blank = sec.get("blank_above", set())
+            for i, vid_id in enumerate(sec_vids):
+                if i > 0 and vid_id in sec_blank:
+                    lines.append("")
+                metadata = dict(video_metadata.get(vid_id, {}))
+                metadata["title"] = video_titles.get(vid_id) or metadata.get("title") or "Untitled Video"
+                lines.append(_format_playlist_entry_line(vid_id, metadata, playlist_entry_format))
+    else:
+        for i, vid_id in enumerate(video_ids):
+            if i > 0 and vid_id in blank_above:
+                lines.append("")
+            metadata = dict(video_metadata.get(vid_id, {}))
+            metadata["title"] = video_titles.get(vid_id) or metadata.get("title") or "Untitled Video"
+            lines.append(_format_playlist_entry_line(vid_id, metadata, playlist_entry_format))
+
+    # Ensure clean trailing newline without multiple blank lines
+    while len(lines) > 1 and lines[-1] == "" and lines[-2] == "":
+        lines.pop()
+    if lines and lines[-1] != "":
+        lines.append("")
 
     temp_file = f"{file_path}.tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + ("\n" if lines else ""))
+            f.write("\n".join(lines))
         if os.path.exists(file_path):
             os.replace(temp_file, file_path)
         else:
@@ -311,4 +592,3 @@ def save_playlist_file(file_path, video_ids, video_titles, blank_above=None, cli
     except OSError as e:
         print(f"[!] Error saving normalized playlist to '{file_path}': {e}")
         return False
-

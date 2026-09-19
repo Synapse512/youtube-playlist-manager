@@ -40,6 +40,7 @@ Google Cloud only comes into play later, if you want to do the two things `yt-dl
 youtube-playlist-manager/
 ├── main.py                  # CLI entry point
 ├── settings.toml            # user configuration (commented)
+├── playlist-settings.toml   # per-playlist preferences & sync modes
 ├── core/
 │   ├── config.py            # settings & data persistence
 │   ├── auth.py              # OAuth login & client selection
@@ -49,12 +50,13 @@ youtube-playlist-manager/
 │   └── ui.py                # dashboard menu & terminal formatting
 ├── oauth-clients/           # OAuth client secrets (do not share)
 │   └── project-a.json
+├── data/
+│   └── playlist-data.json   # linked playlists & activity history
 ├── playlists/
-│   ├── _playlists.json      # linked playlists & activity history
 │   └── my-playlist.txt      # tracklist file (one per playlist)
 ├── playlist-downloads/
 │   └── my-playlist/
-│       ├── _setting.json    # per-playlist download preferences
+│       ├── _manifest.json       # download cache & track file mapping
 │       └── 01 - Song.opus
 └── logs/
     └── my-playlist.log      # operation history & change log

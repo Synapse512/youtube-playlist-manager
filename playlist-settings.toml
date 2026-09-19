@@ -1,0 +1,56 @@
+# [example_playlist]
+# Download format: "audio" (best-quality audio) or "video" (MP4)
+# download-format = "audio"
+#
+# Embed album art into downloaded audio files (requires ffmpeg)
+# embed_thumbnail = true
+#
+# Prefix downloaded filenames with playlist position ("01 - Song.opus")
+# number_files = true
+#
+# Which playlists to sync to YouTube on 'push': "all", "main_only", or "sections_only"
+# push_mode = "all"
+#
+# Download layout: "main_only" (flat folder), "all", or "sections_only"
+# download_mode = "main_only"
+#
+# How each video line is written in the playlist .txt file (run `pull` after changing it).
+# %(id)s is always first. Optional, reorderable fields: %(title)s, %(channel)s, %(duration)s
+# Example: "%(id)s | %(title)s | %(channel)s | %(duration)s"
+# playlist_entry_format = "%(id)s | %(title)s"
+
+
+["Forsaken OST (Roblox)"]
+download-format = "audio"
+embed_thumbnail = true
+number_files = true
+push_mode = "all"
+download_mode = "main_only"
+playlist_entry_format = "%(id)s | %(title)s"
+
+
+["YT better than Spotify"]
+download-format = "audio"
+embed_thumbnail = true
+number_files = true
+push_mode = "all"
+download_mode = "main_only"
+playlist_entry_format = "%(id)s | %(title)s | %(channel)s | %(duration)s"
+
+
+[test512]
+download-format = "audio"
+embed_thumbnail = true
+number_files = true
+push_mode = "all"
+download_mode = "sections_only"
+playlist_entry_format = "%(id)s | %(title)s"
+
+
+[testplaylist]
+download-format = "audio"
+embed_thumbnail = true
+number_files = true
+push_mode = "all"
+download_mode = "sections_only"
+playlist_entry_format = "%(id)s | %(title)s"

@@ -18,18 +18,25 @@ from .config import (
     PLAYLISTS_DIR,
     record_activity,
     log_playlist_event,
+    load_playlist_settings,
+    save_playlist_settings,
 )
 from .parser import (
     sanitize_filename,
     get_playlist_name_for_target,
+    resolve_playlist_id,
     parse_playlist_file,
     save_playlist_file,
 )
+from .config import playlist_entry_format_fields
 
-DOWNLOAD_SETTINGS_FILENAME = "_setting.json"
+DOWNLOAD_MANIFEST_FILENAME = "_manifest.json"
+DOWNLOAD_SETTINGS_FILENAME = DOWNLOAD_MANIFEST_FILENAME
 
 _IGNORED_FILENAMES = {
-    DOWNLOAD_SETTINGS_FILENAME,
+    DOWNLOAD_MANIFEST_FILENAME,
+    "_manifest.json",
+    "_setting.json",
     "_settings.json",
     "_ypm-download-settings.json",
     "ypm-download-settings.json",
@@ -39,15 +46,20 @@ _IGNORED_FILENAMES = {
 
 
 def _migrate_legacy_files(playlist_download_dir):
-    """Migrates legacy setting filenames to _setting.json and cleans up deprecated archive files."""
-    new_settings = os.path.join(playlist_download_dir, DOWNLOAD_SETTINGS_FILENAME)
-    for old_name in ("_settings.json", "_ypm-download-settings.json", "ypm-download-settings.json"):
+    """Migrates legacy setting filenames to _manifest.json and cleans up deprecated archive files."""
+    manifest_path = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
+    for old_name in ("_setting.json", "_settings.json", "_ypm-download-settings.json", "ypm-download-settings.json"):
         old_path = os.path.join(playlist_download_dir, old_name)
-        if os.path.isfile(old_path) and not os.path.isfile(new_settings):
+        if os.path.isfile(old_path):
             try:
-                os.rename(old_path, new_settings)
-                break
-            except OSError:
+                if not os.path.isfile(manifest_path):
+                    with open(old_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    tracks = data.get("tracks", {}) if isinstance(data, dict) else {}
+                    with open(manifest_path, "w", encoding="utf-8") as f:
+                        json.dump({"tracks": tracks}, f, indent=4)
+                os.remove(old_path)
+            except Exception:
                 pass
 
     # Clean up deprecated yt-dlp archive files
@@ -58,6 +70,7 @@ def _migrate_legacy_files(playlist_download_dir):
                 os.remove(arch_path)
             except OSError:
                 pass
+
 
 
 def find_ytdlp(settings=None):
@@ -122,36 +135,64 @@ def find_js_runtime():
     return None
 
 
-def load_playlist_download_settings(playlist_download_dir):
-    """Loads per-playlist download settings (format, number_files, embed_thumbnail) from the playlist download directory."""
+def load_playlist_manifest(playlist_download_dir):
+    """Loads per-playlist download cache (tracks mapping) from _manifest.json."""
     _migrate_legacy_files(playlist_download_dir)
-    settings_file = os.path.join(playlist_download_dir, DOWNLOAD_SETTINGS_FILENAME)
-    if os.path.isfile(settings_file):
+    manifest_file = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
+    if os.path.isfile(manifest_file):
         try:
-            with open(settings_file, "r", encoding="utf-8") as f:
+            with open(manifest_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return data
         except Exception:
             pass
-    return {}
+    return {"tracks": {}}
 
 
-def save_playlist_download_settings(playlist_download_dir, settings_dict):
-    """Saves per-playlist download settings (format, number_files, embed_thumbnail) to the playlist download directory."""
+load_playlist_download_settings = load_playlist_manifest
+
+
+def save_playlist_manifest(playlist_download_dir, manifest_dict):
+    """Saves per-playlist download cache (tracks mapping) to _manifest.json."""
     os.makedirs(playlist_download_dir, exist_ok=True)
-    settings_file = os.path.join(playlist_download_dir, DOWNLOAD_SETTINGS_FILENAME)
+    manifest_file = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
     try:
-        with open(settings_file, "w", encoding="utf-8") as f:
-            json.dump(settings_dict, f, indent=4)
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            json.dump(manifest_dict, f, indent=4)
     except Exception as e:
-        print(f"    [!] Warning: Could not save playlist download settings: {e}")
+        print(f"    [!] Warning: Could not save playlist manifest: {e}")
 
 
-def fetch_video_titles_ytdlp(video_ids, settings=None):
+save_playlist_download_settings = save_playlist_manifest
+
+
+
+def _clean_ytdlp_value(value):
+    value = (value or "").strip()
+    return "" if value in ("NA", "N/A", "None", "null") else value
+
+
+def format_duration(seconds):
+    """Converts a duration in seconds (int, float or numeric string) to m:ss or h:mm:ss."""
+    try:
+        total = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if total < 0:
+        return ""
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def fetch_video_metadata_ytdlp(video_ids, settings=None):
     """
-    Fetches video titles for a list of YouTube video IDs or URLs using yt-dlp.
-    Returns a dict {video_id: title}.
+    Fetches id/title/channel/duration for YouTube video IDs using yt-dlp (one full
+    extraction per video, so this is the slow path - prefer the playlist fetch when possible).
+    Returns a dict {video_id: {"id", "title", "channel", "duration"}}.
     Requires no Google API quota and no OAuth credentials.
     """
     if not video_ids:
@@ -170,8 +211,9 @@ def fetch_video_titles_ytdlp(video_ids, settings=None):
         ytdlp_bin,
         "--encoding", "utf-8",
         "--no-warnings",
-        "--print", "%(id)s\t%(title)s",
+        "--ignore-errors",
         "--no-download",
+        "--print", "%(id)s\t%(title|)s\t%(channel,uploader|)s\t%(duration|)s",
     ]
 
     js_rt = find_js_runtime()
@@ -180,7 +222,7 @@ def fetch_video_titles_ytdlp(video_ids, settings=None):
 
     cmd += ["--batch-file", batch_path]
 
-    titles = {}
+    metadata = {}
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     try:
         res = subprocess.run(
@@ -194,22 +236,96 @@ def fetch_video_titles_ytdlp(video_ids, settings=None):
             check=False,
         )
         for line in res.stdout.splitlines():
-            line = line.strip()
-            if "\t" in line:
-                v_id, v_title = line.split("\t", 1)
-                v_id = v_id.strip()
-                v_title = v_title.strip()
-                if v_id and v_title:
-                    titles[v_id] = v_title
+            parts = line.rstrip("\r\n").split("\t")
+            if len(parts) < 2:
+                continue
+            while len(parts) < 4:
+                parts.append("")
+            v_id, v_title, channel, duration = [_clean_ytdlp_value(p) for p in parts[:4]]
+            if v_id:
+                metadata[v_id] = {
+                    "id": v_id,
+                    "title": v_title,
+                    "channel": channel,
+                    "duration": format_duration(duration),
+                }
     except Exception as e:
-        print(f"[!] Warning: Failed to fetch titles with yt-dlp: {e}")
+        print(f"[!] Warning: Failed to fetch video metadata with yt-dlp: {e}")
     finally:
         try:
             os.remove(batch_path)
         except OSError:
             pass
 
-    return titles
+    return metadata
+
+
+def fetch_video_titles_ytdlp(video_ids, settings=None):
+    """Fetches video titles for a list of YouTube video IDs using yt-dlp."""
+    return {
+        vid: meta.get("title", "")
+        for vid, meta in fetch_video_metadata_ytdlp(video_ids, settings).items()
+        if meta.get("title")
+    }
+
+
+def find_missing_metadata(video_ids, video_metadata, required_fields):
+    """Returns the video IDs (in order, no duplicates) that lack a value for any of required_fields."""
+    required = [f for f in required_fields if f != "id"]
+    seen = set()
+    missing = []
+    for vid in video_ids:
+        if vid in seen:
+            continue
+        seen.add(vid)
+        meta = video_metadata.get(vid) or {}
+        if any(not meta.get(f) for f in required):
+            missing.append(vid)
+    return missing
+
+
+def fill_missing_metadata(video_ids, video_metadata, required_fields, settings=None, playlist_id=None):
+    """
+    Fills in missing id/title/channel/duration values in video_metadata (in place) using yt-dlp.
+
+    Strategy (cheapest first):
+      1. One fast flat fetch of the whole playlist (if playlist_id is given).
+      2. A per-video lookup only for videos that are still missing something.
+
+    Only empty values are filled; anything already present is left untouched.
+    Returns the set of video IDs yt-dlp was able to answer for. IDs that are missing
+    metadata but NOT in that set are unreachable via yt-dlp (private/deleted/yt-dlp missing)
+    and are the only ones worth retrying through the YouTube API.
+    """
+    answered = set()
+    missing = find_missing_metadata(video_ids, video_metadata, required_fields)
+    if not missing or not find_ytdlp(settings):
+        return answered
+
+    def _merge(vid, detail):
+        base = video_metadata.setdefault(vid, {"id": vid})
+        for key, value in detail.items():
+            if value and not base.get(key):
+                base[key] = value
+
+    if playlist_id:
+        print("[*] Reading playlist metadata using yt-dlp...")
+        flat_ids, _, flat_meta = fetch_playlist_tracks_ytdlp(playlist_id, settings)
+        if flat_ids:
+            for vid in missing:
+                if vid in flat_meta:
+                    _merge(vid, flat_meta[vid])
+                    answered.add(vid)
+            missing = find_missing_metadata(missing, video_metadata, required_fields)
+
+    if missing:
+        print(f"[*] Looking up {len(missing)} video(s) individually with yt-dlp (0 Google API quota)...")
+        detailed = fetch_video_metadata_ytdlp(missing, settings)
+        for vid, detail in detailed.items():
+            _merge(vid, detail)
+            answered.add(vid)
+
+    return answered
 
 
 def fetch_playlist_title_ytdlp(playlist_id, settings=None):
@@ -257,21 +373,23 @@ def fetch_playlist_title_ytdlp(playlist_id, settings=None):
 
 def fetch_playlist_tracks_ytdlp(playlist_id, settings=None):
     """
-    Fetches the live list of tracks for a YouTube playlist using yt-dlp.
-    Returns (video_ids, video_titles) ordered exactly as on YouTube (1..N).
-    Returns (None, None) if yt-dlp fails or playlist is private.
+    Fetches the live list of tracks for a YouTube playlist using yt-dlp (single fast call).
+    Returns (video_ids, video_titles, video_metadata) ordered exactly as on YouTube (1..N).
+    video_metadata values contain id/title/channel/duration (any of channel/duration may be
+    empty if YouTube's playlist listing does not include them).
+    Returns (None, None, None) if yt-dlp fails or playlist is private.
     """
     ytdlp_bin = find_ytdlp(settings)
     if not ytdlp_bin:
-        return None, None
+        return None, None, None
 
     cmd = [
         ytdlp_bin,
         "--encoding", "utf-8",
         "--no-warnings",
         "--flat-playlist",
-        "--print", "%(playlist_index)s\t%(id)s\t%(title)s",
         "--no-download",
+        "--print", "%(playlist_index|)s\t%(id)s\t%(title|)s\t%(channel,uploader|)s\t%(duration|)s",
     ]
     js_rt = find_js_runtime()
     if js_rt:
@@ -292,33 +410,111 @@ def fetch_playlist_tracks_ytdlp(playlist_id, settings=None):
             check=False,
         )
         if res.returncode != 0:
-            return None, None
+            return None, None, None
 
         for line in res.stdout.splitlines():
-            line = line.strip()
-            parts = line.split("\t")
-            if len(parts) >= 3:
-                idx_str, vid_id, title = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                try:
-                    idx = int(idx_str)
-                except ValueError:
-                    idx = len(raw_items) + 1
-                if vid_id:
-                    raw_items.append((idx, vid_id, title or "Untitled Video"))
+            parts = line.rstrip("\r\n").split("\t")
+            if len(parts) < 3:
+                continue
+            while len(parts) < 5:
+                parts.append("")
+            idx_str, vid_id, title, channel, duration = [_clean_ytdlp_value(p) for p in parts[:5]]
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                idx = len(raw_items) + 1
+            if vid_id:
+                meta = {
+                    "id": vid_id,
+                    "title": title or "Untitled Video",
+                    "channel": channel,
+                    "duration": format_duration(duration),
+                }
+                raw_items.append((idx, vid_id, meta))
 
         if not raw_items:
-            return None, None
+            return None, None, None
 
         raw_items.sort(key=lambda x: x[0])
         video_ids = [x[1] for x in raw_items]
-        video_titles = {x[1]: x[2] for x in raw_items}
-        return video_ids, video_titles
+        video_metadata = {x[1]: x[2] for x in raw_items}
+        video_titles = {vid: video_metadata[vid].get("title", "Untitled Video") for vid in video_ids}
+        return video_ids, video_titles, video_metadata
     except Exception:
-        return None, None
+        return None, None, None
 
 
 _AUDIO_EXTS = {'.opus', '.m4a', '.mp3', '.aac', '.flac', '.ogg', '.wav'}
 _VIDEO_EXTS = {'.mp4', '.mkv', '.mov', '.avi'}
+
+
+def _is_media_filename(fname):
+    ext = os.path.splitext(fname)[1].lower()
+    return ext in _AUDIO_EXTS or ext in _VIDEO_EXTS
+
+
+def _folder_has_media(folder):
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return False
+    return any(_is_media_filename(fname) for fname in entries)
+
+
+def _move_flat_download_cache_to_subfolder(playlist_download_dir, subfolder_name):
+    """
+    Moves legacy flat playlist downloads into a layout subfolder.
+    Used when a playlist that was previously downloaded as main_only is changed
+    to a sectioned download mode that expects FULL_PLAYLIST.
+    """
+    if not os.path.isdir(playlist_download_dir):
+        return 0
+
+    subfolder_dir = os.path.join(playlist_download_dir, subfolder_name)
+    root_manifest_path = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
+    moved_count = 0
+
+    try:
+        entries = os.listdir(playlist_download_dir)
+    except OSError:
+        return 0
+
+    media_files = []
+    for fname in entries:
+        fpath = os.path.join(playlist_download_dir, fname)
+        if os.path.isfile(fpath) and _is_media_filename(fname):
+            media_files.append(fname)
+
+    has_manifest = os.path.isfile(root_manifest_path)
+    if not media_files and not has_manifest:
+        return 0
+
+    os.makedirs(subfolder_dir, exist_ok=True)
+
+    for fname in media_files:
+        src = os.path.join(playlist_download_dir, fname)
+        dst = os.path.join(subfolder_dir, fname)
+        try:
+            if not os.path.exists(dst):
+                shutil.move(src, dst)
+                moved_count += 1
+        except OSError as exc:
+            print(f"    [!] Could not move '{fname}' into '{subfolder_name}': {exc}")
+
+    if has_manifest:
+        root_manifest = load_playlist_manifest(playlist_download_dir)
+        dest_manifest = load_playlist_manifest(subfolder_dir)
+        merged_tracks = dest_manifest.get("tracks", {})
+        merged_tracks.update(root_manifest.get("tracks", {}))
+        save_playlist_manifest(subfolder_dir, {"tracks": merged_tracks})
+        try:
+            os.remove(root_manifest_path)
+        except OSError:
+            pass
+
+    if moved_count:
+        print(f"[*] Moved {moved_count} existing flat download(s) into '{subfolder_name}' for the new download layout.")
+    return moved_count
 
 
 def _detect_folder_format(folder):
@@ -374,7 +570,7 @@ def _norm_alpha(s: str) -> str:
     return re.sub(r'[\W_]+', '', _norm_title(s))
 
 
-def _sync_deletions(playlist_download_dir, target_video_ids, target_video_titles):
+def _sync_deletions(playlist_download_dir, target_video_ids, target_video_titles, manifest_tracks=None):
     """
     Accounts for deletions in playlist.txt when synchronizing downloads:
     - Removes media files from playlist_download_dir that belonged to removed tracks.
@@ -390,13 +586,21 @@ def _sync_deletions(playlist_download_dir, target_video_ids, target_video_titles
             current_target_titles.add(_norm_title(t))
             current_target_titles.add(_norm_alpha(t))
 
+    target_id_set = set(target_video_ids)
+    # Media files known to belong to still-current target tracks via manifest
+    kept_manifest_files = set()
+    if manifest_tracks:
+        for vid, fname in manifest_tracks.items():
+            if vid in target_id_set:
+                kept_manifest_files.add(fname)
+
     try:
         entries = os.listdir(playlist_download_dir)
     except OSError:
         entries = []
 
     for fname in entries:
-        if fname.startswith('.') or fname in _IGNORED_FILENAMES:
+        if fname.startswith('.') or fname in _IGNORED_FILENAMES or fname in kept_manifest_files:
             continue
         fpath = os.path.join(playlist_download_dir, fname)
         if not os.path.isfile(fpath):
@@ -531,13 +735,13 @@ def _audit_tracks_on_disk(playlist_download_dir, target_video_ids, target_video_
     return present_video_ids, missing_video_ids, id_to_file_map
 
 
-def _sync_file_numbering(playlist_download_dir, target_video_ids, target_video_titles, number_files):
+def _sync_file_numbering(playlist_download_dir, target_video_ids, target_video_titles, number_files, manifest_tracks=None):
     """
     Renames existing downloaded files to match the 'number_files' setting
     and the exact order of tracks in the target playlist.
-    Uses multi-pass matching and a collision-free two-phase rename.
+    Uses multi-pass matching (manifest -> exact -> alphanumeric -> 1:1) and a collision-free two-phase rename.
 
-    Returns a (renamed, skipped, errors) tuple.
+    Returns a (renamed, skipped, errors, updated_manifest) 4-tuple.
     """
     pad_width = max(2, len(str(len(target_video_ids))))
 
@@ -557,7 +761,7 @@ def _sync_file_numbering(playlist_download_dir, target_video_ids, target_video_t
     try:
         entries = sorted(os.listdir(playlist_download_dir))
     except OSError:
-        return 0, 0, 0
+        return 0, 0, 0, {}
 
     media_files = []
     for fname in entries:
@@ -588,11 +792,26 @@ def _sync_file_numbering(playlist_download_dir, target_video_ids, target_video_t
     media_files.sort(key=lambda x: (0, x["num"]) if x["has_number"] else (1, x["fname"].lower()))
 
     matched_pairs = []  # (media_file, target)
-    unmatched_files = []
     assigned_target_indices = set()
+    assigned_mf_paths = set()
+
+    # Pass 0: match using existing manifest mapping if present and file is still on disk
+    if manifest_tracks:
+        mf_by_fname = {mf["fname"]: mf for mf in media_files}
+        for t in targets:
+            expected_fname = manifest_tracks.get(t["vid_id"])
+            if expected_fname and expected_fname in mf_by_fname:
+                mf = mf_by_fname[expected_fname]
+                if mf["fpath"] not in assigned_mf_paths:
+                    matched_pairs.append((mf, t))
+                    assigned_target_indices.add(t["idx"])
+                    assigned_mf_paths.add(mf["fpath"])
+
+    remaining_media = [mf for mf in media_files if mf["fpath"] not in assigned_mf_paths]
+    unmatched_files = []
 
     # Pass 1: exact normalized match
-    for mf in media_files:
+    for mf in remaining_media:
         matched = None
         for t in targets:
             if t["idx"] not in assigned_target_indices and t["norm"] and t["norm"] == mf["norm"]:
@@ -725,95 +944,23 @@ def resolve_download_format(fmt=None, allow_prompt=True):
     return "audio"
 
 
-def command_download(args, settings, playlist_data, fmt=None):
+def _execute_folder_download(folder_dir, target_video_ids, target_video_titles, fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt, parent_cache_dir=None):
     """
-    Downloads all tracks from a local playlist text file using yt-dlp as audio or video.
-    Maintains an archive file in the playlist download folder so subsequent runs
-    only download newly added tracks without redownloading existing ones.
-    Persists format, number_files, and thumbnail preferences per playlist in _ypm-download-settings.json.
+    Downloads and synchronizes tracks for a single directory (main playlist or section subfolder).
+    If parent_cache_dir is provided, copies any already-downloaded tracks to avoid re-downloading.
+    Returns (newly_downloaded, already_cached_count, deleted_count).
     """
-    ytdlp_bin = find_ytdlp(settings)
-    if not ytdlp_bin:
-        print("\n" + "=" * 60)
-        print(" [!] yt-dlp Not Found")
-        print("=" * 60)
-        print("  yt-dlp is required for download commands.")
-        print("  Please download 'yt-dlp.exe' from:")
-        print("    https://github.com/yt-dlp/yt-dlp/releases")
-        print("  and place it in this project's root directory, or add it to your PATH.")
-        print("  (You can also define a custom path in settings.toml under 'ytdlp_path').")
-        print("=" * 60 + "\n")
-        return
+    os.makedirs(folder_dir, exist_ok=True)
+    _migrate_legacy_files(folder_dir)
+    manifest_data = load_playlist_manifest(folder_dir)
+    manifest_tracks = manifest_data.get("tracks", {})
 
-    target_name = args.target.strip()
-    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
-    safe_name = sanitize_filename(playlist_name)
-    file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
-
-    if not os.path.exists(file_path):
-        print(f"[!] Error: Local file '{file_path}' does not exist.")
-        print(f"    Run 'python main.py pull {target_name}' first to download the playlist.")
-        return
-
-    print(f"[*] Reading tracks from '{file_path}'...")
-    target_video_ids, target_video_titles, skipped, blank_above = parse_playlist_file(file_path)
-
-    if not target_video_ids:
-        print("[!] Error: No valid video IDs or URLs found in the local text file.")
-        return
-
-    # Auto-format: If any tracks lack titles (e.g. user pasted raw URLs/IDs), resolve them via yt-dlp now
-    missing_titles = [v for v in target_video_ids if not target_video_titles.get(v)]
-    if missing_titles:
-        print(f"[*] Resolving titles for {len(missing_titles)} unformatted track(s) with yt-dlp...")
-        fetched = fetch_video_titles_ytdlp(missing_titles, settings)
-        for vid, title in fetched.items():
-            target_video_titles[vid] = title
-        save_playlist_file(file_path, target_video_ids, target_video_titles, blank_above=blank_above)
-        print(f"[+] Automatically formatted '{file_path}' with video titles.")
-
-    # Resolve output directory
-    downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
-    playlist_download_dir = os.path.join(downloads_root, safe_name)
-    os.makedirs(playlist_download_dir, exist_ok=True)
-
-    # Migrate any legacy filenames (.ytdlp_archive.txt -> _ytdlp_archive.txt, etc.)
-    _migrate_legacy_files(playlist_download_dir)
-
-    # Load per-playlist download settings
-    saved_dl_settings = load_playlist_download_settings(playlist_download_dir)
-
-    # Determine format
-    if fmt:
-        fmt = resolve_download_format(fmt, allow_prompt=False)
-        saved_dl_settings["format"] = fmt
-        save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
-    elif saved_dl_settings.get("format"):
-        fmt = saved_dl_settings["format"]
-        print(f"[*] Using saved playlist format: '{fmt}' (from {DOWNLOAD_SETTINGS_FILENAME})")
-    else:
-        fmt = resolve_download_format(None, allow_prompt=True)
-        saved_dl_settings["format"] = fmt
-        saved_dl_settings.setdefault("embed_thumbnail", True)
-        saved_dl_settings.setdefault("number_files", True)
-        save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
-
-    # Determine numbering preference from per-playlist settings (defaults to True)
-    if "number_files" in saved_dl_settings:
-        number_files = bool(saved_dl_settings["number_files"])
-    else:
-        number_files = True
-        saved_dl_settings["number_files"] = True
-        save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
-
-    embed_thumbnail = saved_dl_settings.get("embed_thumbnail", True)
-
-    existing_fmt = _detect_folder_format(playlist_download_dir)
+    existing_fmt = _detect_folder_format(folder_dir)
     if existing_fmt and existing_fmt != fmt:
         print(f"[*] Folder contains {existing_fmt} files — switching to {fmt}. Removing old files...")
         removed = 0
-        for fname in os.listdir(playlist_download_dir):
-            fpath = os.path.join(playlist_download_dir, fname)
+        for fname in os.listdir(folder_dir):
+            fpath = os.path.join(folder_dir, fname)
             if os.path.isfile(fpath) and not fname.startswith('.') and fname not in _IGNORED_FILENAMES:
                 try:
                     os.remove(fpath)
@@ -821,67 +968,57 @@ def command_download(args, settings, playlist_data, fmt=None):
                 except OSError as exc:
                     print(f"    [!] Could not remove '{fname}': {exc}")
         print(f"    Removed {removed} old file(s). Starting fresh download.")
+        manifest_tracks = {}
 
-    manifest_tracks = saved_dl_settings.get("tracks", {})
+    # Copy already downloaded files from parent cache if available
+    if parent_cache_dir and os.path.isdir(parent_cache_dir):
+        parent_manifest = load_playlist_manifest(parent_cache_dir).get("tracks", {})
+        for vid in target_video_ids:
+            if vid in parent_manifest and vid not in manifest_tracks:
+                src_file = os.path.join(parent_cache_dir, parent_manifest[vid])
+                if os.path.isfile(src_file):
+                    dst_file = os.path.join(folder_dir, os.path.basename(src_file))
+                    if not os.path.isfile(dst_file):
+                        try:
+                            shutil.copy2(src_file, dst_file)
+                            manifest_tracks[vid] = os.path.basename(dst_file)
+                        except Exception:
+                            pass
+                    else:
+                        manifest_tracks[vid] = os.path.basename(dst_file)
 
-    # Account for deletions in playlist.txt by cleaning orphaned files
-    deleted_files = _sync_deletions(
-        playlist_download_dir, target_video_ids, target_video_titles
-    )
+    # Sync deletions
+    deleted_files = _sync_deletions(folder_dir, target_video_ids, target_video_titles, manifest_tracks)
     if deleted_files > 0:
-        print(f"[*] Cleaned up {deleted_files} deleted track(s) from download directory.")
+        print(f"[*] Cleaned up {deleted_files} deleted track(s) from '{folder_dir}'.")
         target_id_set = set(target_video_ids)
         manifest_tracks = {vid: fn for vid, fn in manifest_tracks.items() if vid in target_id_set}
 
     # Audit physical files on disk
     present_video_ids, missing_video_ids, id_to_file_map = _audit_tracks_on_disk(
-        playlist_download_dir, target_video_ids, target_video_titles, manifest_tracks
+        folder_dir, target_video_ids, target_video_titles, manifest_tracks
     )
 
     to_download = missing_video_ids
     already_cached = [v for v in target_video_ids if v in present_video_ids]
 
-    print(f"[*] Found {len(target_video_ids)} track(s) in playlist:")
-    print(f"    - Already downloaded / cached: {len(already_cached)}")
-    print(f"    - To download:                 {len(to_download)}")
+    print(f"[*] Folder '{os.path.basename(folder_dir)}': {len(target_video_ids)} track(s) (Cached: {len(already_cached)}, To download: {len(to_download)})")
 
     if not to_download:
-        # Sync numbering across all existing files in case of reordering, deletions, or preference change
         ren, skipped_ren, ren_errors, updated_manifest = _sync_file_numbering(
-            playlist_download_dir, target_video_ids, target_video_titles, number_files
+            folder_dir, target_video_ids, target_video_titles, number_files, manifest_tracks
         )
         if ren:
-            print(f"[*] Renumbered {ren} file(s) to match playlist order.")
+            print(f"[*] Renumbered {ren} file(s) in '{os.path.basename(folder_dir)}'.")
+        save_playlist_manifest(folder_dir, {"tracks": updated_manifest})
+        return 0, len(already_cached), deleted_files
 
-        saved_dl_settings["tracks"] = updated_manifest
-        save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
-
-        print(f"\n[+] All {len(target_video_ids)} track(s) are already downloaded in '{playlist_download_dir}'.")
-        print("=" * 60)
-        print(" Download Summary")
-        print("=" * 60)
-        print(f"  * {'Playlist:':<22} {playlist_name}")
-        print(f"  * {'Mode:':<22} {'Audio (best quality)' if fmt == 'audio' else 'Video (MP4)'}")
-        print(f"  * {'Destination:':<22} {playlist_download_dir}")
-        print(f"  * {'Total Tracks:':<22} {len(target_video_ids):>4d} track(s)")
-        print(f"  * {'Newly Downloaded:':<22} {0:>4d} track(s)")
-        print(f"  * {'Already Up-to-Date:':<22} {len(already_cached):>4d} track(s)")
-        if deleted_files > 0:
-            print(f"  * {'Deleted Tracks:':<22} {deleted_files:>4d} track(s)")
-        print("=" * 60 + "\n")
-        return
-
-    # Write URLs to a temporary batch file to avoid Windows command length limits
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".txt") as batch_f:
         for vid_id in to_download:
             batch_f.write(f"https://www.youtube.com/watch?v={vid_id}\n")
         batch_path = batch_f.name
 
-    output_template = os.path.join(playlist_download_dir, "%(title)s.%(ext)s")
-
-    ffmpeg_bin = find_ffmpeg(settings)
-    js_rt = find_js_runtime()
-
+    output_template = os.path.join(folder_dir, "%(title)s.%(ext)s")
     cmd = [
         ytdlp_bin,
         "--encoding", "utf-8",
@@ -915,14 +1052,10 @@ def command_download(args, settings, playlist_data, fmt=None):
         "--batch-file", batch_path,
     ]
 
-    print(f"[*] Starting yt-dlp ({'Audio' if fmt == 'audio' else 'Video'})...\n")
-    interrupted = False
+    print(f"[*] Starting yt-dlp for '{os.path.basename(folder_dir)}' ({'Audio' if fmt == 'audio' else 'Video'})...\n")
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     try:
         subprocess.run(cmd, env=env, check=False)
-    except KeyboardInterrupt:
-        interrupted = True
-        print("\n\n[!] Download paused/cancelled by user.")
     except Exception as e:
         print(f"[!] Error running yt-dlp: {e}")
     finally:
@@ -931,32 +1064,186 @@ def command_download(args, settings, playlist_data, fmt=None):
         except OSError:
             pass
 
-    # Sync file numbering across all files in playlist directory after download
     ren, skipped_ren, ren_errors, updated_manifest = _sync_file_numbering(
-        playlist_download_dir, target_video_ids, target_video_titles, number_files
+        folder_dir, target_video_ids, target_video_titles, number_files, manifest_tracks
     )
     if ren:
-        print(f"[*] Synchronized numbering for {ren} file(s) in download directory.")
+        print(f"[*] Synchronized numbering for {ren} file(s) in '{os.path.basename(folder_dir)}'.")
 
     newly_downloaded = len(set(updated_manifest.keys()) - set(present_video_ids))
-    saved_dl_settings["tracks"] = updated_manifest
-    save_playlist_download_settings(playlist_download_dir, saved_dl_settings)
+    save_playlist_manifest(folder_dir, {"tracks": updated_manifest})
+    return newly_downloaded, len(already_cached), deleted_files
 
-    if interrupted:
-        print(f"[!] Partial download summary: {newly_downloaded} new track(s) completed before cancellation.\n")
+
+def command_download(args, settings, playlist_data, fmt=None):
+    """
+    Downloads all tracks from playlists/<name>.txt using yt-dlp.
+    Persists format, number_files, thumbnails, and section download modes in playlist-settings.toml.
+    Caches track mappings in <downloads_dir>/<name>/_manifest.json.
+    """
+    ytdlp_bin = find_ytdlp(settings)
+    if not ytdlp_bin:
+        print("\n" + "=" * 60)
+        print(" [!] yt-dlp Not Found")
+        print("=" * 60)
+        print("  yt-dlp is required for download commands.")
+        print("  Please download 'yt-dlp.exe' from:")
+        print("    https://github.com/yt-dlp/yt-dlp/releases")
+        print("  and place it in this project's root directory, or add it to your PATH.")
+        print("  (You can also define a custom path in settings.toml under 'ytdlp_path').")
+        print("=" * 60 + "\n")
         return
+
+    target_name = args.target.strip()
+    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
+    safe_name = sanitize_filename(playlist_name)
+    file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
+
+    if not os.path.exists(file_path):
+        print(f"[!] Error: Local file '{file_path}' does not exist.")
+        print(f"    Run 'python main.py pull {target_name}' first to download the playlist.")
+        return
+
+    print(f"[*] Reading tracks from '{file_path}'...")
+    target_video_ids, target_video_titles, skipped, blank_above, sections_data = parse_playlist_file(file_path)
+
+    if not target_video_ids:
+        print("[!] Error: No valid video IDs or URLs found in the local text file.")
+        return
+
+    # Load playlist-specific settings from playlist-settings.toml
+    pl_settings = load_playlist_settings(playlist_name)
+    entry_fields = playlist_entry_format_fields(pl_settings.get("playlist_entry_format"))
+    video_metadata = sections_data.setdefault("video_metadata", {})
+
+    # Auto-format: resolve anything the playlist file is missing via yt-dlp.
+    # Titles are always required for downloads (they name and match the files),
+    # even if the playlist_entry_format leaves them out of the text file.
+    missing_for_file = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
+    missing_for_download = find_missing_metadata(target_video_ids, video_metadata, entry_fields + ["title"])
+    if missing_for_download:
+        print(f"[*] Resolving details for {len(missing_for_download)} track(s) with yt-dlp...")
+        fill_missing_metadata(
+            target_video_ids, video_metadata, entry_fields + ["title"],
+            settings, playlist_id=resolve_playlist_id(target_name, playlist_data),
+        )
+        for vid in target_video_ids:
+            title = (video_metadata.get(vid) or {}).get("title")
+            if title:
+                target_video_titles[vid] = title
+        if missing_for_file:
+            resolved = {v: target_video_titles.get(v) or "Untitled Video" for v in target_video_ids}
+            save_playlist_file(file_path, target_video_ids, resolved, blank_above=blank_above, sections_data=sections_data)
+            print(f"[+] Automatically formatted '{file_path}'.")
+
+    downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
+    playlist_download_dir = os.path.join(downloads_root, safe_name)
+    os.makedirs(playlist_download_dir, exist_ok=True)
+
+    if fmt:
+        fmt = resolve_download_format(fmt, allow_prompt=False)
+        pl_settings["download-format"] = fmt
+        save_playlist_settings(playlist_name, {"download-format": fmt})
+    elif pl_settings.get("download-format"):
+        fmt = pl_settings["download-format"]
+        print(f"[*] Using saved playlist format: '{fmt}' (from playlist-settings.toml)")
+    else:
+        fmt = resolve_download_format(None, allow_prompt=True)
+        pl_settings["download-format"] = fmt
+        save_playlist_settings(playlist_name, {"download-format": fmt})
+
+    number_files = pl_settings.get("number_files", True)
+    embed_thumbnail = pl_settings.get("embed_thumbnail", True)
+    download_mode = pl_settings.get("download_mode", "main_only")  # "main_only", "all", "sections_only"
+
+    ffmpeg_bin = find_ffmpeg(settings)
+    js_rt = find_js_runtime()
+
+    is_sectioned = sections_data.get("is_sectioned", False)
+    sections = sections_data.get("sections", [])
+
+    total_new = 0
+    total_cached = 0
+    total_deleted = 0
+
+    if is_sectioned and download_mode in ("all", "sections_only"):
+        explicit_sections = [s for s in sections if not s.get("is_implicit")]
+        if download_mode == "all":
+            full_playlist_dir = os.path.join(playlist_download_dir, "FULL_PLAYLIST")
+            _move_flat_download_cache_to_subfolder(playlist_download_dir, "FULL_PLAYLIST")
+            print(f"[*] Download mode: 'all' (downloading FULL_PLAYLIST folder + {len(explicit_sections)} section folders)...")
+            new_dl, cached, deleted = _execute_folder_download(
+                full_playlist_dir, target_video_ids, target_video_titles,
+                fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt
+            )
+            total_new += new_dl
+            total_cached += cached
+            total_deleted += deleted
+
+            # Then download / organize explicit sections (reuse files from FULL_PLAYLIST)
+            for sec in explicit_sections:
+                sec_name = sanitize_filename(sec.get("title") or sec.get("playlist_id") or "Section")
+                sec_dir = os.path.join(playlist_download_dir, sec_name)
+                sec_vids = sec.get("video_ids", [])
+                if not sec_vids:
+                    continue
+                s_new, s_cached, s_del = _execute_folder_download(
+                    sec_dir, sec_vids, target_video_titles,
+                    fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt,
+                    parent_cache_dir=full_playlist_dir
+                )
+                total_new += s_new
+                total_cached += s_cached
+                total_deleted += s_del
+        else:  # sections_only
+            flat_cache_dir = playlist_download_dir if _folder_has_media(playlist_download_dir) else None
+            print(f"[*] Download mode: 'sections_only' (downloading {len(explicit_sections)} section folders)...")
+            for sec in explicit_sections:
+                sec_name = sanitize_filename(sec.get("title") or sec.get("playlist_id") or "Section")
+                sec_dir = os.path.join(playlist_download_dir, sec_name)
+                sec_vids = sec.get("video_ids", [])
+                if not sec_vids:
+                    continue
+                s_new, s_cached, s_del = _execute_folder_download(
+                    sec_dir, sec_vids, target_video_titles,
+                    fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt,
+                    parent_cache_dir=flat_cache_dir
+                )
+                total_new += s_new
+                total_cached += s_cached
+                total_deleted += s_del
+    else:
+        # Default / main_only download.
+        # If a FULL_PLAYLIST subfolder already exists (from a prior 'all' run),
+        # keep downloading there so cached files are recognised and nothing re-downloads.
+        full_playlist_dir = os.path.join(playlist_download_dir, "FULL_PLAYLIST")
+        effective_dir = full_playlist_dir if os.path.isdir(full_playlist_dir) else playlist_download_dir
+        new_dl, cached, deleted = _execute_folder_download(
+            effective_dir, target_video_ids, target_video_titles,
+            fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt
+        )
+        total_new += new_dl
+        total_cached += cached
+        total_deleted += deleted
 
     print("\n" + "=" * 60)
     print(" Download Summary")
     print("=" * 60)
     print(f"  * {'Playlist:':<22} {playlist_name}")
     print(f"  * {'Mode:':<22} {'Audio (best quality)' if fmt == 'audio' else 'Video (MP4)'}")
-    print(f"  * {'Destination:':<22} {playlist_download_dir}")
+    _full_dir = os.path.join(playlist_download_dir, "FULL_PLAYLIST")
+    if is_sectioned and download_mode == "all":
+        _dest_str = f"{playlist_download_dir}/FULL_PLAYLIST/ (+ section folders)"
+    elif os.path.isdir(_full_dir):
+        _dest_str = f"{playlist_download_dir}/FULL_PLAYLIST/"
+    else:
+        _dest_str = str(playlist_download_dir)
+    print(f"  * {'Destination:':<22} {_dest_str}")
     print(f"  * {'Total Tracks:':<22} {len(target_video_ids):>4d} track(s)")
-    print(f"  * {'Newly Downloaded:':<22} {newly_downloaded:>4d} track(s)")
-    print(f"  * {'Already Up-to-Date:':<22} {len(already_cached):>4d} track(s)")
-    if deleted_files > 0:
-        print(f"  * {'Deleted Tracks:':<22} {deleted_files:>4d} track(s)")
+    print(f"  * {'Newly Downloaded:':<22} {total_new:>4d} track(s)")
+    print(f"  * {'Already Up-to-Date:':<22} {total_cached:>4d} track(s)")
+    if total_deleted > 0:
+        print(f"  * {'Deleted Tracks:':<22} {total_deleted:>4d} track(s)")
     print("=" * 60 + "\n")
 
     record_activity(playlist_data, playlist_name, f"download-{fmt}")
@@ -966,7 +1253,7 @@ def command_download(args, settings, playlist_data, fmt=None):
         f"download-{fmt}",
         "yt-dlp",
         summary_lines=[
-            f"Downloaded {newly_downloaded} new track(s) ({'audio' if fmt == 'audio' else 'video'}) to '{playlist_download_dir}'"
+            f"Downloaded {total_new} new track(s) ({'audio' if fmt == 'audio' else 'video'}) to '{playlist_download_dir}'"
         ],
         playlist_data=playlist_data
     )

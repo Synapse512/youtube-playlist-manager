@@ -71,9 +71,23 @@ def show_menu(settings, playlist_data, parser=None):
                 else:
                     last_edit_str = "None recorded"
 
-                print(f"    {idx}. {p_name} [{terminal_link(pid, url)}]")
+                sec_str = ""
+                safe_n = sanitize_filename(p_name)
+                fpath = os.path.join(PLAYLISTS_DIR, f"{safe_n}.txt")
+                if os.path.isfile(fpath):
+                    try:
+                        from .parser import parse_playlist_file
+                        _, _, _, _, sdata = parse_playlist_file(fpath)
+                        if sdata.get("is_sectioned"):
+                            explicit_secs = [s for s in sdata.get("sections", []) if not s.get("is_implicit")]
+                            sec_str = f" ({len(explicit_secs)} sections)"
+                    except Exception:
+                        pass
+
+                print(f"    {idx}. {p_name}{sec_str} [{terminal_link(pid, url)}]")
                 print(f"       • most recent edit: {last_edit_str}")
                 print()
+
 
     raw_client_limit = settings.get("menu_client_count", 3)
 

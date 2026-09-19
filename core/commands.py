@@ -3,6 +3,7 @@ Command handlers for link, unlink, list, pull, push, and format.
 """
 
 import os
+import re
 
 try:
     from googleapiclient.errors import HttpError
@@ -14,6 +15,7 @@ from .config import (
     save_playlist_data,
     record_activity,
     log_playlist_event,
+    playlist_entry_format_fields,
 )
 from .auth import resolve_oauth_client, get_youtube_service
 from .parser import (
@@ -27,6 +29,66 @@ from .parser import (
 from .sync import compute_minimal_moves
 
 
+def _format_iso8601_duration(duration):
+    """Converts YouTube API PT#H#M#S durations to h:mm:ss or m:ss."""
+    if not duration:
+        return ""
+    match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)
+    if not match:
+        return duration
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _metadata_titles(video_metadata):
+    return {
+        vid: meta.get("title", "Untitled Video")
+        for vid, meta in (video_metadata or {}).items()
+    }
+
+
+def _enrich_metadata_via_api(youtube, video_ids, video_metadata, required_fields):
+    """
+    Fills missing title/channel/duration values in video_metadata (in place) using
+    YouTube Data API videos.list (1 quota unit per 50 videos).
+    Returns the number of quota units used.
+    """
+    from .downloader import find_missing_metadata
+
+    missing = find_missing_metadata(video_ids, video_metadata, required_fields)
+    units = 0
+    for i in range(0, len(missing), 50):
+        batch_ids = missing[i:i + 50]
+        try:
+            res = youtube.videos().list(
+                part="snippet,contentDetails",
+                id=",".join(batch_ids)
+            ).execute()
+            units += 1
+        except Exception as e:
+            print(f"[!] Warning: Could not fetch extra video metadata via API: {e}")
+            continue
+        for item in res.get("items", []):
+            vid = item.get("id")
+            if not vid:
+                continue
+            meta = video_metadata.setdefault(vid, {"id": vid})
+            snippet = item.get("snippet", {})
+            content = item.get("contentDetails", {})
+            for key, value in (
+                ("title", snippet.get("title", "").strip()),
+                ("channel", snippet.get("channelTitle", "").strip()),
+                ("duration", _format_iso8601_duration(content.get("duration", ""))),
+            ):
+                if value and not meta.get(key):
+                    meta[key] = value
+    return units
+
+
 def _resolve_command_client(args):
     """
     Resolves which oauth-client JSON to use for this operation.
@@ -38,7 +100,7 @@ def _resolve_command_client(args):
 
 
 def command_link(args, settings, playlist_data):
-    """Links a YouTube playlist to playlists/_playlists.json using the title fetched from YouTube."""
+    """Links a YouTube playlist to data/playlist-data.json using the title fetched from YouTube."""
     from .downloader import (
         fetch_playlist_title_ytdlp,
         DOWNLOAD_SETTINGS_FILENAME,
@@ -114,34 +176,35 @@ def command_link(args, settings, playlist_data):
         playlists[playlist_name] = playlist_id
         save_playlist_data(playlist_data)
 
-    # Create initial playlist file with a reminder to pull before editing
+    # Create initial playlist file with main header
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{playlist_name}.txt")
     if not os.path.exists(file_path):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write("# PULL BEFORE MAKING CHANGES\n\n")
+                f.write(f"## https://www.youtube.com/playlist?list={playlist_id} | {playlist_name}\n\n")
             print(f"[+] Created initial playlist file '{file_path}'.")
         except OSError as e:
             print(f"[!] Warning: Could not create initial file '{file_path}': {e}")
 
-    # Initialize the playlist-downloads folder and default _setting.json
+    # Initialize per-playlist settings in playlist-settings.toml
+    from .config import load_playlist_settings
+    load_playlist_settings(playlist_name)
+
+    # Initialize the playlist-downloads folder and default _manifest.json
     downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
     playlist_download_dir = os.path.join(downloads_root, playlist_name)
     os.makedirs(playlist_download_dir, exist_ok=True)
-    settings_path = os.path.join(playlist_download_dir, DOWNLOAD_SETTINGS_FILENAME)
-    if not os.path.exists(settings_path):
-        existing = load_playlist_download_settings(playlist_download_dir)
-        if not existing:
-            default_settings = {
-                "embed_thumbnail": True,
-                "number_files": True,
-                "tracks": {}
-            }
-            save_playlist_download_settings(playlist_download_dir, default_settings)
-            print(f"[+] Initialized download folder and settings: '{playlist_download_dir}/'")
+    from .downloader import DOWNLOAD_MANIFEST_FILENAME, save_playlist_manifest, load_playlist_manifest
+    manifest_path = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
+    if not os.path.exists(manifest_path):
+        existing = load_playlist_manifest(playlist_download_dir)
+        if not existing or not existing.get("tracks"):
+            save_playlist_manifest(playlist_download_dir, {"tracks": {}})
+            print(f"[+] Initialized download folder and manifest: '{playlist_download_dir}/'")
     else:
         print(f"[*] Download folder already initialized: '{playlist_download_dir}/'")
+
 
     print(f"[+] Successfully linked '{playlist_name}' -> Playlist ID: '{playlist_id}'")
     record_activity(playlist_data, playlist_name, "link")
@@ -156,7 +219,7 @@ def command_link(args, settings, playlist_data):
 
 
 def command_unlink(args, settings, playlist_data):
-    """Removes a linked playlist from playlists/_playlists.json."""
+    """Removes a linked playlist from data/playlist-data.json."""
     name = args.name.strip()
     playlists = playlist_data.get("playlists", {})
 
@@ -211,29 +274,48 @@ def command_list(args, settings, playlist_data):
         else:
             last_info = "  (no CLI edits yet)"
 
-        print(f"  {name}  [{terminal_link(pid, url)}]{last_info}")
+        safe_n = sanitize_filename(name)
+        fpath = os.path.join(PLAYLISTS_DIR, f"{safe_n}.txt")
+        sec_info = ""
+        if os.path.isfile(fpath):
+            try:
+                _, _, _, _, sdata = parse_playlist_file(fpath)
+                if sdata.get("is_sectioned"):
+                    explicit_secs = [s for s in sdata.get("sections", []) if not s.get("is_implicit")]
+                    sec_info = f" • {len(explicit_secs)} section(s)"
+            except Exception:
+                pass
+
+        print(f"  {name}  [{terminal_link(pid, url)}]{last_info}{sec_info}")
+
+
 
 def command_pull(args, settings, playlist_data):
     """Pulls a remote YouTube playlist into a local text file."""
-    from .downloader import fetch_playlist_tracks_ytdlp
+    from .downloader import fetch_playlist_tracks_ytdlp, fill_missing_metadata
+    from .config import load_playlist_settings
 
     target_name = args.target.strip()
     playlist_id = resolve_playlist_id(target_name, playlist_data)
     playlist_name = get_playlist_name_for_target(target_name, playlist_data)
     safe_name = sanitize_filename(playlist_name)
+    pl_settings = load_playlist_settings(playlist_name)
+    entry_fields = playlist_entry_format_fields(pl_settings.get("playlist_entry_format"))
 
     os.makedirs(PLAYLISTS_DIR, exist_ok=True)
     file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
 
-    # Check if local file already exists to preserve custom blank line spacing and compute diff
+    # Check if local file already exists to preserve custom blank line spacing, sections, and compute diff
     existing_blank_above = set()
     existing_video_ids = []
     existing_titles = {}
+    existing_sections_data = None
     if os.path.exists(file_path):
         try:
-            existing_video_ids, existing_titles, _, existing_blank_above = parse_playlist_file(file_path)
+            existing_video_ids, existing_titles, _, existing_blank_above, existing_sections_data = parse_playlist_file(file_path)
         except Exception:
             pass
+
 
     pull_method = (getattr(args, "method", None) or settings.get("pull_method", "auto")).strip().lower()
     explicit_client = getattr(args, "client", None)
@@ -247,6 +329,7 @@ def command_pull(args, settings, playlist_data):
 
     pulled_video_ids = None
     pulled_titles = {}
+    pulled_metadata = {}
     method_used = "yt-dlp"
     oauth_client = None
     pages_read = 0
@@ -254,10 +337,14 @@ def command_pull(args, settings, playlist_data):
 
     if pull_method in ("auto", "ytdlp"):
         print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' using yt-dlp (0 Google API quota)...")
-        ytdlp_ids, ytdlp_titles = fetch_playlist_tracks_ytdlp(playlist_id, settings)
+        ytdlp_ids, ytdlp_titles, ytdlp_metadata = fetch_playlist_tracks_ytdlp(playlist_id, settings)
         if ytdlp_ids is not None:
             pulled_video_ids = ytdlp_ids
             pulled_titles = ytdlp_titles
+            pulled_metadata = ytdlp_metadata or {}
+            # The playlist listing may omit some fields (e.g. duration); fill any gaps per video.
+            fill_missing_metadata(pulled_video_ids, pulled_metadata, entry_fields, settings)
+            pulled_titles = _metadata_titles(pulled_metadata)
             method_used = "yt-dlp"
         else:
             if pull_method == "ytdlp":
@@ -291,9 +378,15 @@ def command_pull(args, settings, playlist_data):
                     snippet = item.get("snippet", {})
                     v_id = snippet.get("resourceId", {}).get("videoId")
                     title = snippet.get("title", "Untitled")
+                    channel = snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle", "")
                     pos = snippet.get("position", len(raw_items))
                     if v_id:
-                        raw_items.append((pos, v_id, title))
+                        raw_items.append((pos, v_id, {
+                            "id": v_id,
+                            "title": title,
+                            "channel": channel,
+                            "duration": "",
+                        }))
 
                 next_page_token = res.get("nextPageToken")
                 page_num += 1
@@ -326,9 +419,17 @@ def command_pull(args, settings, playlist_data):
         # Ensure items are ordered by their actual position in the playlist
         raw_items.sort(key=lambda x: x[0])
         pulled_video_ids = [x[1] for x in raw_items]
-        pulled_titles = {x[1]: x[2] for x in raw_items}
+        pulled_metadata = {x[1]: x[2] for x in raw_items}
+        if "duration" in entry_fields:
+            # Only duration needs the extra videos.list call (title/channel come with the playlist items)
+            quota_units += _enrich_metadata_via_api(youtube, pulled_video_ids, pulled_metadata, entry_fields)
+        pulled_titles = _metadata_titles(pulled_metadata)
         pages_read = page_num - 1
         method_used = "api"
+
+    if existing_sections_data is None:
+        existing_sections_data = {}
+    existing_sections_data["video_metadata"] = pulled_metadata
 
     # Diff calculation comparing existing local playlist vs pulled YouTube playlist
     current_list = []
@@ -417,8 +518,45 @@ def command_pull(args, settings, playlist_data):
     if deleted_count == 0 and inserted_count == 0 and moved_count == 0:
         print("[+] Local playlist is already up-to-date with YouTube.")
 
-    if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above):
-        return
+    # Reconcile sections if local file is sectioned
+    if existing_sections_data and existing_sections_data.get("is_sectioned"):
+        existing_id_set = set(existing_video_ids)
+        pulled_id_set = set(pulled_video_ids)
+        new_inserted_ids = [vid for vid in pulled_video_ids if vid not in existing_id_set]
+        deleted_ids_set = existing_id_set - pulled_id_set
+
+        # Remove deleted tracks from existing sections
+        for sec in existing_sections_data.get("sections", []):
+            sec["video_ids"] = [v for v in sec.get("video_ids", []) if v not in deleted_ids_set]
+
+        # Put new tracks into ## Uncategorized section at the end
+        if new_inserted_ids:
+            uncategorized = None
+            for sec in existing_sections_data.get("sections", []):
+                if sec.get("title", "").strip().lower() in ("uncategorized", "sectionless"):
+                    uncategorized = sec
+                    break
+            if uncategorized is None:
+                uncategorized = {
+                    "title": "Uncategorized",
+                    "playlist_id": None,
+                    "url": None,
+                    "video_ids": [],
+                    "blank_above": set(),
+                    "header_blank_above": True,
+                    "is_implicit": False,
+                }
+                existing_sections_data["sections"].append(uncategorized)
+
+            for new_v in new_inserted_ids:
+                if new_v not in uncategorized["video_ids"]:
+                    uncategorized["video_ids"].append(new_v)
+
+        if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
+            return
+    else:
+        if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
+            return
 
     print("\n" + "=" * 60)
     print(" Pull Summary")
@@ -453,40 +591,24 @@ def command_pull(args, settings, playlist_data):
         playlist_data=playlist_data
     )
 
-def command_push(args, settings, playlist_data):
-    """Pushes the local text file track order and changes to YouTube, then normalizes the local file."""
-    target_name = args.target.strip()
-    playlist_id = resolve_playlist_id(target_name, playlist_data)
-    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
-    safe_name = sanitize_filename(playlist_name)
-    file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
-
-    if not os.path.exists(file_path):
-        print(f"[!] Error: Local file '{file_path}' does not exist.")
-        print(f"    Run 'python main.py pull {target_name}' first to download the playlist.")
-        return
-
-    # Safety checks and Pull Reminders
-    if settings.get("safety_check_before_push", True):
-        confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
-        if confirm != 'y':
-            print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
-            return
-
-    # Parse local text file (supports IDs, URLs, and ID|Title formats)
-    print(f"[*] Reading and validating local file '{file_path}'...")
-    target_video_ids, target_video_titles, skipped, blank_above = parse_playlist_file(file_path)
-
-    if not target_video_ids:
-        print("[!] Error: No valid video IDs or URLs found in the local text file. Push aborted.")
-        return
-
-    print(f"[+] Parsed {len(target_video_ids)} valid tracks from local file.")
-
-    # Resolve which oauth-client JSON to use for this operation
-    oauth_client = _resolve_command_client(args)
-
-    youtube = get_youtube_service(oauth_client)
+def _sync_single_playlist_to_youtube(
+    youtube,
+    playlist_id,
+    playlist_name,
+    target_video_ids,
+    target_video_titles,
+    oauth_client,
+    settings,
+    playlist_data,
+    file_path=None,
+    blank_above=None,
+    sections_data=None,
+):
+    """
+    Synchronizes a single YouTube playlist with a target list of video IDs and titles.
+    Performs deletion, insertion, and minimal-moves reordering.
+    Returns (success, resolved_titles).
+    """
     print(f"[*] Fetching current live playlist from YouTube ({playlist_id})...")
 
     current_items = []
@@ -503,7 +625,7 @@ def command_push(args, settings, playlist_data):
                 maxResults=50,
                 pageToken=next_page_token
             ).execute()
-            list_units += 1  # 1 unit per page request
+            list_units += 1
 
             for item in res.get("items", []):
                 snippet = item.get("snippet", {})
@@ -521,7 +643,7 @@ def command_push(args, settings, playlist_data):
 
     except HttpError as e:
         if "quotaExceeded" in str(e) or (hasattr(e, "resp") and e.resp.status == 403):
-            print("\n[!] YouTube API daily quota limit reached while reading playlist.")
+            print(f"\n[!] YouTube API daily quota limit reached while reading playlist '{playlist_name}'.")
             record_activity(playlist_data, playlist_name, "push (quota exceeded)")
             log_playlist_event(
                 settings,
@@ -529,19 +651,18 @@ def command_push(args, settings, playlist_data):
                 "push (ABANDONED - QUOTA EXCEEDED)",
                 oauth_client,
                 summary_lines=[
-                    "Push abandoned: YouTube API daily quota limit reached during initial track fetch",
+                    f"Push abandoned: YouTube API daily quota limit reached during initial track fetch for '{playlist_name}'",
                     f"{list_units} list request(s) completed before quota exhaustion"
                 ],
                 detail_lines=[f"Error: {e}"],
                 playlist_data=playlist_data
             )
-            return
-        print(f"[!] YouTube API Error while fetching current playlist: {e}")
-        return
+            return False, {}
+        print(f"[!] YouTube API Error while fetching current playlist '{playlist_name}': {e}")
+        return False, {}
 
-    # Critical: Sort current items by remote position so current_list reflects true sequence
     current_items.sort(key=lambda x: x["position"])
-    print(f"[+] Retrieved {len(current_items)} tracks currently on YouTube.")
+    print(f"[+] Retrieved {len(current_items)} tracks currently on YouTube for '{playlist_name}'.")
 
     current_list = list(current_items)
     target_counts = {}
@@ -565,20 +686,18 @@ def command_push(args, settings, playlist_data):
         print("\n" + "=" * 60)
         print(" [!] YouTube API Daily Quota Exceeded")
         print("=" * 60)
-        print(f"  * Operation abandoned during: {phase_name}")
+        print(f"  * Operation abandoned during: {phase_name} ({playlist_name})")
         print(f"  * Total quota consumed:       {total_q} unit(s)")
         print(f"  * Successfully deleted:       {deleted_count} track(s)")
         print(f"  * Successfully inserted:      {inserted_count} track(s)")
         print(f"  * Successfully reordered:     {moved_count} track(s)")
         print("=" * 60)
         print("  Wait for your daily quota to reset or use another --client.")
-        print(f"  (This abandoned operation has been logged to logs/{sanitize_filename(playlist_name)}.log)\n")
 
-        # Update local file to preserve YouTube's partial state if any changes occurred
-        if deleted_count > 0 or inserted_count > 0 or moved_count > 0:
+        if file_path and (deleted_count > 0 or inserted_count > 0 or moved_count > 0):
             partial_vids = [it["videoId"] for it in current_list if it.get("videoId")]
             partial_titles = {it["videoId"]: it.get("title", "") for it in current_list if it.get("videoId")}
-            save_playlist_file(file_path, partial_vids, partial_titles, blank_above=blank_above)
+            save_playlist_file(file_path, partial_vids, partial_titles, blank_above=blank_above, sections_data=sections_data)
             print(f"[*] Updated local file '{file_path}' to match YouTube's current state.")
 
         record_activity(playlist_data, playlist_name, "push (quota exceeded)")
@@ -589,14 +708,14 @@ def command_push(args, settings, playlist_data):
             "push (ABANDONED - QUOTA EXCEEDED)",
             oauth_client,
             summary_lines=[
-                f"Push abandoned: YouTube API daily quota limit reached during {phase_name}",
+                f"Push abandoned: YouTube API daily quota limit reached during {phase_name} for '{playlist_name}'",
                 f"Partial progress: {inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered ({total_q} quota units used)"
             ],
             detail_lines=diff_d if diff_d else [f"Quota limit reached during {phase_name} before any modifications were made."],
             playlist_data=playlist_data
         )
 
-    # 1. Delete videos removed locally (iterate backwards to keep list indices valid)
+    # 1. Delete videos removed locally
     sync_failed = False
     curr_counts = {}
     for item in current_list:
@@ -607,7 +726,6 @@ def command_push(args, settings, playlist_data):
         item = current_list[i]
         vid = item["videoId"]
         target_allowed = target_counts.get(vid, 0)
-        # If video is not in target or exceeds count in target
         if curr_counts.get(vid, 0) > target_allowed:
             track_title = item.get("title", "Untitled")
             print(f"[-] Deleting track from YouTube: '{track_title}' ({vid})")
@@ -620,11 +738,11 @@ def command_push(args, settings, playlist_data):
             except HttpError as e:
                 if "quotaExceeded" in str(e):
                     _handle_quota_exceeded("deletion phase")
-                    return
+                    return False, {}
                 print(f"[!] Error deleting track {vid}: {e}")
                 sync_failed = True
 
-    # 2. Add new tracks present locally at their exact target positions
+    # 2. Add new tracks present locally
     active_counts = {}
     for item in current_list:
         v = item["videoId"]
@@ -633,7 +751,6 @@ def command_push(args, settings, playlist_data):
     target_seen_counts = {}
     for pos, vid_id in enumerate(target_video_ids):
         target_seen_counts[vid_id] = target_seen_counts.get(vid_id, 0) + 1
-        # If this occurrence is beyond what's currently in YouTube, insert it
         if target_seen_counts[vid_id] > active_counts.get(vid_id, 0):
             track_title = target_video_titles.get(vid_id, vid_id)
             print(f"[+] Inserting new track into YouTube at position {pos} ({vid_id})...")
@@ -662,17 +779,15 @@ def command_push(args, settings, playlist_data):
             except HttpError as e:
                 if "quotaExceeded" in str(e):
                     _handle_quota_exceeded("insertion phase")
-                    return
+                    return False, {}
                 print(f"    [!] Error inserting {vid_id}: {e}")
                 sync_failed = True
 
     if sync_failed:
-        print("\n[!] Push stopped before reordering because one or more delete/insert operations failed.")
-        print("    Pull the playlist again before retrying so the local file reflects YouTube's current state.")
-        return
+        print(f"\n[!] Push for '{playlist_name}' stopped before reordering because one or more delete/insert operations failed.")
+        return False, {}
 
-    # 3. Reorder tracks using LIS minimal moves algorithm to minimize quota units
-    # Map target video IDs to specific playlistItemIds in current_list
+    # 3. Reorder tracks using LIS minimal moves algorithm
     available_by_vid = {}
     for item in current_list:
         available_by_vid.setdefault(item["videoId"], []).append(item["playlistItemId"])
@@ -683,7 +798,6 @@ def command_push(args, settings, playlist_data):
             target_item_ids.append(available_by_vid[vid].pop(0))
 
     curr_item_ids = [item["playlistItemId"] for item in current_list]
-
     reorder_moves = compute_minimal_moves(curr_item_ids, target_item_ids)
 
     for item_id, target_pos in reorder_moves:
@@ -705,7 +819,6 @@ def command_push(args, settings, playlist_data):
                     }
                 }
             ).execute()
-            # Update local list state to match YouTube's new sequence
             moved_item = current_list.pop(from_idx)
             moved_item["position"] = target_pos
             current_list.insert(target_pos, moved_item)
@@ -714,25 +827,10 @@ def command_push(args, settings, playlist_data):
         except HttpError as e:
             if "quotaExceeded" in str(e):
                 _handle_quota_exceeded("reordering phase")
-                return
+                return False, {}
             print(f"[!] Error moving track {vid_id}: {e}")
 
-    # 4. Normalize and update local text file (<video_id> | <video_title>)
-    current_video_map = {item["videoId"]: item for item in current_list if item.get("videoId")}
-    resolved_titles = {}
-    for vid_id in target_video_ids:
-        if vid_id in current_video_map and current_video_map[vid_id].get("title"):
-            resolved_titles[vid_id] = current_video_map[vid_id]["title"]
-        elif target_video_titles.get(vid_id):
-            resolved_titles[vid_id] = target_video_titles[vid_id]
-        else:
-            resolved_titles[vid_id] = "Untitled Video"
-
-    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above):
-        print(f"[+] Automatically updated and formatted local file '{file_path}' (replaced links with video IDs and titles).")
-
     # Calculate exact API quota units used
-    # playlistItems.list: 1 unit | delete: 50 units | insert: 50 units | update: 50 units
     list_quota = list_units * 1
     delete_quota = deleted_count * 50
     insert_quota = inserted_count * 50
@@ -740,7 +838,7 @@ def command_push(args, settings, playlist_data):
     total_quota = list_quota + delete_quota + insert_quota + update_quota
 
     print("\n" + "=" * 60)
-    print(" Synchronization Summary")
+    print(f" Synchronization Summary ({playlist_name})")
     print("=" * 60)
     print(f"  * {'OAuth Client:':<22} {oauth_client}")
     print(f"  * {'Deleted:':<22} {deleted_count:>4d} track(s)     ({delete_quota:>5d} quota units)")
@@ -750,7 +848,8 @@ def command_push(args, settings, playlist_data):
     print("-" * 60)
     print(f"  * {'Total Quota Used:':<22} {total_quota:>4d} unit(s)")
     print("=" * 60)
-    print("[+] Playlist synchronization complete!\n")
+    print(f"[+] '{playlist_name}' synchronization complete!\n")
+
     record_activity(playlist_data, playlist_name, "push")
     diff_details = deleted_details + inserted_details + moved_details
     log_playlist_event(
@@ -765,10 +864,139 @@ def command_push(args, settings, playlist_data):
         playlist_data=playlist_data
     )
 
+    current_video_map = {item["videoId"]: item for item in current_list if item.get("videoId")}
+    resolved_titles = {}
+    for vid_id in target_video_ids:
+        if vid_id in current_video_map and current_video_map[vid_id].get("title"):
+            resolved_titles[vid_id] = current_video_map[vid_id]["title"]
+        elif target_video_titles.get(vid_id):
+            resolved_titles[vid_id] = target_video_titles[vid_id]
+        else:
+            resolved_titles[vid_id] = "Untitled Video"
+
+    return True, resolved_titles
+
+
+def command_push(args, settings, playlist_data):
+    """Pushes the local text file track order and changes to YouTube, then normalizes the local file."""
+    from .config import load_playlist_settings
+
+    target_name = args.target.strip()
+    playlist_id = resolve_playlist_id(target_name, playlist_data)
+    playlist_name = get_playlist_name_for_target(target_name, playlist_data)
+    safe_name = sanitize_filename(playlist_name)
+    file_path = os.path.join(PLAYLISTS_DIR, f"{safe_name}.txt")
+
+    if not os.path.exists(file_path):
+        print(f"[!] Error: Local file '{file_path}' does not exist.")
+        print(f"    Run 'python main.py pull {target_name}' first to download the playlist.")
+        return
+
+    # Safety checks and Pull Reminders
+    if settings.get("safety_check_before_push", True):
+        confirm = input(f"[?] Have you pulled recent YouTube additions for '{target_name}' before pushing? (y/N): ").strip().lower()
+        if confirm != 'y':
+            print("[!] Push aborted by user. Run 'python main.py pull <name>' first to avoid overwriting recent changes.")
+            return
+
+    # Parse local text file (supports IDs, URLs, and ID|Title formats)
+    print(f"[*] Reading and validating local file '{file_path}'...")
+    target_video_ids, target_video_titles, skipped, blank_above, sections_data = parse_playlist_file(file_path)
+
+    if not target_video_ids:
+        print("[!] Error: No valid video IDs or URLs found in the local text file. Push aborted.")
+        return
+
+    print(f"[+] Parsed {len(target_video_ids)} valid tracks from local file.")
+
+    # Load push mode setting from playlist-settings.toml
+    pl_settings = load_playlist_settings(playlist_name)
+    push_mode = pl_settings.get("push_mode", "all")  # "all", "main_only", "sections_only"
+
+    # Resolve OAuth client
+    oauth_client = _resolve_command_client(args)
+    youtube = get_youtube_service(oauth_client)
+
+    is_sectioned = sections_data.get("is_sectioned", False)
+    sections = sections_data.get("sections", [])
+
+    # 1. If sectioned and push_mode in ("all", "sections_only"), push each linked section
+    if is_sectioned and push_mode in ("all", "sections_only"):
+        for sec in sections:
+            if sec.get("is_implicit"):
+                continue
+            sec_id = sec.get("playlist_id")
+            sec_title = sec.get("title", "Section")
+            sec_vids = sec.get("video_ids", [])
+            if sec_id:
+                print(f"\n[+] Pushing section '{sec_title}' -> YouTube Playlist: {sec_id}")
+                _sync_single_playlist_to_youtube(
+                    youtube,
+                    sec_id,
+                    f"{playlist_name} [{sec_title}]",
+                    sec_vids,
+                    target_video_titles,
+                    oauth_client,
+                    settings,
+                    playlist_data
+                )
+            else:
+                print(f"\n[*] Section '{sec_title}' has no linked playlist ID (skipped section push).")
+
+    # 2. Push main playlist if push_mode in ("all", "main_only")
+    resolved_titles = {}
+    if not is_sectioned or push_mode in ("all", "main_only"):
+        print(f"\n[+] Pushing main playlist '{playlist_name}' -> YouTube Playlist: {playlist_id}")
+        ok, res_titles = _sync_single_playlist_to_youtube(
+            youtube,
+            playlist_id,
+            playlist_name,
+            target_video_ids,
+            target_video_titles,
+            oauth_client,
+            settings,
+            playlist_data,
+            file_path=file_path,
+            blank_above=blank_above,
+            sections_data=sections_data
+        )
+        if ok:
+            resolved_titles = res_titles
+
+    # Normalize and update local text file (fields per playlist_entry_format)
+    if not resolved_titles:
+        for vid in target_video_ids:
+            resolved_titles[vid] = target_video_titles.get(vid) or "Untitled Video"
+
+    # Newly added tracks (e.g. pasted URLs) have no channel/duration yet - fill them in.
+    from .downloader import find_missing_metadata, fill_missing_metadata
+    entry_fields = playlist_entry_format_fields(pl_settings.get("playlist_entry_format"))
+    video_metadata = sections_data.setdefault("video_metadata", {})
+    for vid, title in resolved_titles.items():
+        meta = video_metadata.setdefault(vid, {"id": vid})
+        if title and title != "Untitled Video" and not meta.get("title"):
+            meta["title"] = title
+    missing_meta = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
+    if missing_meta:
+        answered = fill_missing_metadata(
+            target_video_ids, video_metadata, entry_fields, settings, playlist_id=playlist_id
+        )
+        unreachable = [v for v in missing_meta if v not in answered]
+        if unreachable:
+            _enrich_metadata_via_api(youtube, unreachable, video_metadata, entry_fields)
+
+    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above, sections_data=sections_data):
+        print(f"[+] Automatically updated and formatted local file '{file_path}'.")
+
 
 def command_format(args, settings, playlist_data):
-    """Formats and cleans a local playlist file, converting any URLs/raw IDs to '<video_id> | <title>'."""
-    from .downloader import find_ytdlp, fetch_video_titles_ytdlp
+    """
+    Formats and cleans a local playlist file: converts any URLs/raw IDs to the layout defined by the
+    playlist's playlist_entry_format (e.g. '<video_id> | <title> | <channel>') and normalizes section headers.
+    Missing details (title/channel/duration) are fetched with yt-dlp, falling back to the YouTube API.
+    """
+    from .downloader import find_missing_metadata, fill_missing_metadata, fetch_playlist_title_ytdlp
+    from .config import load_playlist_settings
 
     target_name = args.target.strip()
     playlist_name = get_playlist_name_for_target(target_name, playlist_data)
@@ -779,68 +1007,80 @@ def command_format(args, settings, playlist_data):
         print(f"[!] Error: Local file '{file_path}' does not exist.")
         return
 
+    pl_settings = load_playlist_settings(playlist_name)
+    entry_format = pl_settings.get("playlist_entry_format")
+    entry_fields = playlist_entry_format_fields(entry_format)
+
     print(f"[*] Reading and formatting '{file_path}'...")
-    target_video_ids, target_video_titles, _, blank_above = parse_playlist_file(file_path)
+    print(f"[*] Entry format: {entry_format}")
+    target_video_ids, target_video_titles, _, blank_above, sections_data = parse_playlist_file(file_path, entry_format)
 
     if not target_video_ids:
         print("[!] Error: No valid video IDs or URLs found in the file.")
         return
 
-    missing_ids = [v for v in target_video_ids if not target_video_titles.get(v)]
+    # Check and format main header if needed
+    if sections_data.get("main_header"):
+        m_hdr = sections_data["main_header"]
+        if m_hdr.get("playlist_id") and not m_hdr.get("title"):
+            m_title = fetch_playlist_title_ytdlp(m_hdr["playlist_id"], settings)
+            if m_title:
+                m_hdr["title"] = m_title
+                print(f"[+] Formatted main header title: '{m_title}'")
+
+    # Check and format section headers if any have playlist link without title
+    if sections_data.get("is_sectioned"):
+        for sec in sections_data.get("sections", []):
+            if sec.get("is_implicit"):
+                continue
+            if sec.get("playlist_id") and (not sec.get("title") or sec.get("title") == sec.get("playlist_id")):
+                print(f"[*] Fetching section title for '{sec['playlist_id']}' using yt-dlp...")
+                sec_title = fetch_playlist_title_ytdlp(sec["playlist_id"], settings)
+                if sec_title:
+                    sec["title"] = sec_title
+                    print(f"[+] Formatted section title: '{sec_title}' (0 API quota)")
+
+    video_metadata = sections_data.setdefault("video_metadata", {})
+    missing_ids = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
     quota_units = 0
     oauth_client = None
-    method_used = "Local (all titles present)"
+    method_used = "Local (nothing missing)"
 
     if missing_ids:
-        ytdlp_bin = find_ytdlp(settings)
-        if ytdlp_bin:
-            print(f"[*] Fetching titles for {len(missing_ids)} track(s) using yt-dlp (0 Google API quota)...")
-            fetched = fetch_video_titles_ytdlp(missing_ids, settings)
-            for vid, title in fetched.items():
-                target_video_titles[vid] = title
-            method_used = "yt-dlp (0 API quota)"
+        print(f"[*] {len(missing_ids)} track(s) are missing details for the entry format.")
+        answered = fill_missing_metadata(
+            target_video_ids,
+            video_metadata,
+            entry_fields,
+            settings,
+            playlist_id=resolve_playlist_id(target_name, playlist_data),
+        )
+        method_used = "yt-dlp (0 API quota)" if answered else "none"
 
-            # If any are still missing (e.g. yt-dlp couldn't extract some), check for cloud fallback
-            still_missing = [v for v in missing_ids if not target_video_titles.get(v)]
-            if still_missing:
-                print(f"[*] Falling back to YouTube Data API for {len(still_missing)} remaining title(s)...")
-                oauth_client = _resolve_command_client(args)
-                method_used = "yt-dlp + YouTube API"
-                try:
-                    youtube = get_youtube_service(oauth_client)
-                    for i in range(0, len(still_missing), 50):
-                        batch_ids = still_missing[i:i + 50]
-                        res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
-                        quota_units += 1
-                        for item in res.get("items", []):
-                            target_video_titles[item["id"]] = item.get("snippet", {}).get("title", "").strip()
-                except Exception as e:
-                    print(f"[!] Warning: YouTube API fallback failed: {e}")
-        else:
-            # yt-dlp not available, use YouTube Data API directly
+        # Only videos yt-dlp could not answer for at all (yt-dlp missing, private, deleted) go to the API
+        unreachable = [v for v in missing_ids if v not in answered]
+        if unreachable:
+            print(f"[*] Falling back to YouTube Data API for {len(unreachable)} remaining track(s)...")
             oauth_client = _resolve_command_client(args)
-            method_used = "YouTube Data API"
-            print(f"[*] yt-dlp not found. Fetching titles for {len(missing_ids)} tracks from YouTube API...")
+            method_used = "yt-dlp + YouTube API" if answered else "YouTube Data API"
             try:
                 youtube = get_youtube_service(oauth_client)
-                for i in range(0, len(missing_ids), 50):
-                    batch_ids = missing_ids[i:i + 50]
-                    res = youtube.videos().list(part="snippet", id=",".join(batch_ids)).execute()
-                    quota_units += 1  # 1 unit per videos.list batch
-                    for item in res.get("items", []):
-                        v_id = item["id"]
-                        v_title = item.get("snippet", {}).get("title", "").strip()
-                        if v_title:
-                            target_video_titles[v_id] = v_title
+                quota_units += _enrich_metadata_via_api(youtube, unreachable, video_metadata, entry_fields)
             except Exception as e:
-                print(f"[!] Warning: Could not fetch some video titles from YouTube API: {e}")
+                print(f"[!] Warning: YouTube API fallback failed: {e}")
 
     resolved_titles = {}
     for vid_id in target_video_ids:
-        resolved_titles[vid_id] = target_video_titles.get(vid_id) or "Untitled Video"
+        resolved_titles[vid_id] = (video_metadata.get(vid_id) or {}).get("title") or "Untitled Video"
 
-    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above):
+    if save_playlist_file(
+        file_path, target_video_ids, resolved_titles,
+        blank_above=blank_above, sections_data=sections_data, playlist_entry_format=entry_format,
+    ):
         print(f"[+] Successfully formatted '{file_path}' ({len(target_video_ids)} tracks normalized).")
+
+    still_missing = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
+    filled = len(missing_ids) - len(still_missing)
 
     print("\n" + "=" * 60)
     print(" Format Summary")
@@ -849,7 +1089,9 @@ def command_format(args, settings, playlist_data):
     if oauth_client:
         print(f"  * {'OAuth Client:':<22} {oauth_client}")
     print(f"  * {'Tracks Normalized:':<22} {len(target_video_ids):>4d} track(s)")
-    print(f"  * {'Titles Fetched:':<22} {len(missing_ids):>4d} track(s)")
+    print(f"  * {'Entries Completed:':<22} {filled:>4d} track(s)")
+    if still_missing:
+        print(f"  * {'Still Incomplete:':<22} {len(still_missing):>4d} track(s)  (unavailable or no data on YouTube)")
     print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)")
     print("=" * 60 + "\n")
     record_activity(playlist_data, playlist_name, "format")
@@ -859,7 +1101,7 @@ def command_format(args, settings, playlist_data):
         "format",
         oauth_client or method_used,
         summary_lines=[
-            f"Normalized {len(target_video_ids)} track(s), fetched {len(missing_ids)} missing title(s) ({quota_units} quota units via {method_used})"
+            f"Normalized {len(target_video_ids)} track(s), completed {filled} of {len(missing_ids)} incomplete entries ({quota_units} quota units via {method_used})"
         ],
         playlist_data=playlist_data
     )
