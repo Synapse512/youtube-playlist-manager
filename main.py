@@ -45,6 +45,7 @@ def main():
         link_parser = subparsers.add_parser("link", add_help=False)
         link_parser.add_argument("target", nargs="?", metavar="ID_OR_URL")
         link_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        link_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         link_parser.add_argument("--method", "-m", choices=["auto", "ytdlp", "api"], default=None, help="Link method: auto (default), ytdlp (0 quota), or api (OAuth)")
         link_parser.add_argument("-h", "--help", action="store_true")
 
@@ -61,6 +62,7 @@ def main():
         pull_parser = subparsers.add_parser("pull", add_help=False)
         pull_parser.add_argument("target", nargs="?")
         pull_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        pull_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         pull_parser.add_argument("--method", "-m", choices=["auto", "ytdlp", "api"], default=None, help="Pull method: auto (default), ytdlp (0 quota), or api (OAuth)")
         pull_parser.add_argument("-h", "--help", action="store_true")
 
@@ -68,18 +70,25 @@ def main():
         push_parser = subparsers.add_parser("push", add_help=False)
         push_parser.add_argument("target", nargs="?")
         push_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        push_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         push_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: format
         format_parser = subparsers.add_parser("format", add_help=False)
         format_parser.add_argument("target", nargs="?")
         format_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
+        format_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         format_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: download (supports --format audio/video, prompts if omitted)
         dl_parser = subparsers.add_parser("download", add_help=False)
         dl_parser.add_argument("target", nargs="?")
         dl_parser.add_argument("--format", "-f", choices=["audio", "video"], default=None, help="Download mode: audio or video (prompts if omitted)")
+        dl_parser.add_argument("--retry-failed", "-r", action="store_true", help="Re-attempt downloading tracks that previously failed")
+        dl_parser.add_argument("--clear-failed", action="store_true", help="Clear all recorded failed tracks from the playlist manifest")
+        dl_parser.add_argument("--cookies", default=None, metavar="FILE", help="Path to Netscape-format cookies.txt file")
+        dl_parser.add_argument("--cookies-from-browser", default=None, metavar="BROWSER", help="Browser to extract cookies from (e.g. firefox, edge, chrome)")
+        dl_parser.add_argument("--export-urls", action="store_true", help="Export playlist track URLs to urls.txt for manual yt-dlp downloading")
         dl_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: help

@@ -16,8 +16,46 @@
 #
 # How each video line is written in the playlist .txt file (run `pull` after changing it).
 # %(id)s is always first. Optional, reorderable fields: %(title)s, %(channel)s, %(duration)s
-# Example: "%(id)s | %(title)s | %(channel)s | %(duration)s"
+# You can use shorthand (e.g. "id, title, channel") or the full %(field)s syntax.
+# Example: "id, title"  or  "%(id)s | %(title)s"
 # playlist_entry_format = "%(id)s | %(title)s"
+#
+# Custom folder for this playlist's downloads (blank = <downloads_dir>/<playlist name>)
+# download_path = "D:/Music/MyPlaylist"
+#
+# Which name to use for the "everything" download folder in download_mode = "all"
+# (previously always called "FULL_PLAYLIST"). "alias" = use the playlist's own
+# name/alias (default). "header" = use the title from the "### " header in the .txt file.
+# folder_name_source = "alias"
+#
+# Write playlists/<name>.txt atomically (safe, default) or directly in-place ("direct write").
+# Direct writes are slightly faster but can leave a corrupted/truncated file if interrupted.
+# atomic_writes = true
+#
+# Prefix section download folders with their order in the .txt file ("01 - Chill", "02 - Hype")
+# number_section_folders = false
+#
+# oauth-client (from oauth-clients/<name>.json) to use automatically for this playlist,
+# so you are not prompted every time. Leave blank to be asked/auto-selected as usual.
+# oauth_client = "project-a"
+#
+# Google account email to always use for this playlist (e.g. "user@gmail.com").
+# Logins are cached per account in data/tokens/. Leave blank to pick from your
+# cached accounts (or log in with a new one) each time. --account overrides this.
+# account = "user@gmail.com"
+#
+# Path to a Netscape-formatted cookies.txt file specifically for this playlist.
+# cookies_file = "data/cookies.txt"
+#
+# Browser to extract cookies from specifically for this playlist ("chrome", "firefox", "edge", etc.).
+# cookies_from_browser = "firefox"
+#
+# Custom player client for yt-dlp ("default", "mweb", "ios", "android", or blank for default).
+# ytdlp_player_client = ""
+#
+# When `format` fills in a section header, also include the linked section playlist's
+# real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"
+# include_playlist_name_in_sections = false
 
 
 ["Forsaken OST (Roblox)"]
@@ -25,17 +63,37 @@ download-format = "audio"
 embed_thumbnail = true
 number_files = true
 push_mode = "all"
-download_mode = "main_only"
+download_mode = "all"
 playlist_entry_format = "%(id)s | %(title)s"
+download_path = ""
+folder_name_source = "alias"
+atomic_writes = false
+number_section_folders = false
+oauth_client = ""
+account = ""
+include_playlist_name_in_sections = false
+cookies_file = ""
+cookies_from_browser = "firefox"
+ytdlp_player_client = ""
 
 
 ["YT better than Spotify"]
 download-format = "audio"
 embed_thumbnail = true
 number_files = true
-push_mode = "all"
-download_mode = "main_only"
-playlist_entry_format = "%(id)s | %(title)s | %(channel)s | %(duration)s"
+push_mode = "sections_only"
+download_mode = "all"
+playlist_entry_format = "%(id)s | %(title)s"
+download_path = ""
+folder_name_source = "header"
+atomic_writes = false
+number_section_folders = true
+oauth_client = ""
+account = ""
+include_playlist_name_in_sections = true
+cookies_file = ""
+cookies_from_browser = ""
+ytdlp_player_client = ""
 
 
 [test512]
@@ -43,14 +101,15 @@ download-format = "audio"
 embed_thumbnail = true
 number_files = true
 push_mode = "all"
-download_mode = "sections_only"
+download_mode = "all"
 playlist_entry_format = "%(id)s | %(title)s"
-
-
-[testplaylist]
-download-format = "audio"
-embed_thumbnail = true
-number_files = true
-push_mode = "all"
-download_mode = "sections_only"
-playlist_entry_format = "%(id)s | %(title)s"
+download_path = ""
+folder_name_source = "alias"
+atomic_writes = true
+number_section_folders = false
+oauth_client = ""
+account = ""
+include_playlist_name_in_sections = false
+cookies_file = ""
+cookies_from_browser = ""
+ytdlp_player_client = ""

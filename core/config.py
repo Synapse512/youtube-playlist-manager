@@ -16,30 +16,24 @@ except ImportError:
     except ImportError:
         import tomllib
 
-VERSION = "1.1.2"
+VERSION = "1.2.4"
 
 SETTINGS_FILE = "settings.toml"
 DATA_DIR = "data"
+TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
 PLAYLISTS_DIR = "playlists"
 PLAYLISTS_DATA_FILE = os.path.join(DATA_DIR, "playlist-data.json")
 PLAYLIST_SETTINGS_FILE = "playlist-settings.toml"
 
-LEGACY_PLAYLISTS_DATA_FILES = [
-    os.path.join(PLAYLISTS_DIR, ".playlist-data"),
-    os.path.join(PLAYLISTS_DIR, ".playlist-data.json"),
-    os.path.join(PLAYLISTS_DIR, "_playlist-data.json"),
-    os.path.join(PLAYLISTS_DIR, "_playlists.json"),
-]
-LEGACY_PLAYLIST_SETTINGS_FILES = [
-    os.path.join(PLAYLISTS_DIR, "_playlist-settings.toml"),
-    os.path.join(PLAYLISTS_DIR, "_playlist-settings.json"),
-    os.path.join(PLAYLISTS_DIR, "_playlist_settings.json"),
-]
 OAUTH_CLIENTS_DIR = "oauth-clients"
 LOGS_DIR = "logs"
 DOWNLOADS_DIR = "playlist-downloads"
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.force-ssl",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",  # lets the tool detect which Google account logged in, to name/cache its token
+]
 
 # ---------------------------------------------------------------------------
 # Playlist entry format
@@ -67,10 +61,22 @@ def playlist_entry_format_fields(entry_format):
     Returns the ordered list of fields for a playlist_entry_format string.
     Always starts with "id"; unsupported fields are dropped, aliases are resolved
     and duplicates removed. An empty/unusable format falls back to id + title.
+
+    Accepts two syntaxes:
+      - Full:      "%(id)s | %(title)s | %(channel)s | %(duration)s"
+      - Shorthand: "id, title, channel, duration"  (commas or spaces as separators)
     """
-    names = _ENTRY_TOKEN_RE.findall(str(entry_format or ""))
+    fmt_str = str(entry_format or "")
+    names = _ENTRY_TOKEN_RE.findall(fmt_str)
     if not names:
-        return ["id", "title"]
+        # Try shorthand: split on commas and/or whitespace, ignoring empty tokens
+        raw_tokens = [t.strip() for t in re.split(r"[,\s]+", fmt_str) if t.strip()]
+        known = set(ENTRY_FIELDS) | set(ENTRY_FIELD_ALIASES)
+        shorthand_names = [t for t in raw_tokens if t.lower() in known]
+        if shorthand_names:
+            names = shorthand_names
+        else:
+            return ["id", "title"]
     fields = ["id"]
     for name in names:
         name = name.strip().lower()
@@ -92,6 +98,16 @@ DEFAULT_PLAYLIST_SETTINGS = {
     "push_mode": "all",  # "all", "main_only", "sections_only"
     "download_mode": "main_only",  # "main_only", "all", "sections_only"
     "playlist_entry_format": DEFAULT_PLAYLIST_ENTRY_FORMAT,
+    "download_path": "",  # Custom download path (blank = default downloads_dir/<playlist>)
+    "folder_name_source": "alias",  # Names the "all"-mode full-playlist download folder (was hardcoded "FULL_PLAYLIST"): "alias" = playlist's own name; "header" = the title from the "### " header
+    "atomic_writes": True,  # Set to false for direct writes to playlist.txt
+    "number_section_folders": False,  # Order section download folders by their position in playlist.txt
+    "oauth_client": "",  # Default oauth-client (from oauth-clients/) to use for this playlist (blank = ask/auto)
+    "account": "",  # Google account email to always use for this playlist (blank = pick from cached accounts / log in each time). Overridden by --account.
+    "include_playlist_name_in_sections": False,  # 'format' will also write the linked section playlist's real title
+    "cookies_file": "",  # Path to Netscape cookies.txt file for this playlist
+    "cookies_from_browser": "",  # Browser to extract cookies from for this playlist
+    "ytdlp_player_client": "",  # Custom player client for yt-dlp (e.g. "default", "mweb", "ios")
 }
 
 SETTINGS_INFO_KEY = "HOW_TO_EDIT_SETTINGS"
@@ -111,11 +127,30 @@ def _format_toml_settings(settings):
     link_m = settings.get("link_method", "auto")
     ytdlp = settings.get("ytdlp_path", "")
     ffmpeg = settings.get("ffmpeg_path", "")
+    js_rt_path = settings.get("js_runtime_path", "")
+    cookies_file = settings.get("cookies_file", settings.get("ytdlp_cookies_file", ""))
+    cookies_browser = settings.get("ytdlp_cookies_from_browser", settings.get("cookies_from_browser", ""))
+    player_client = settings.get("ytdlp_player_client", "")
+    cache_tokens = "true" if settings.get("cache_oauth_tokens", True) else "false"
+    warn_links = "true" if settings.get("warn_on_malformed_section_links", True) else "false"
+    sleep_int = settings.get("ytdlp_sleep_interval", 0)
+    sleep_req = settings.get("ytdlp_sleep_requests", 0)
+    retry_failed = settings.get("retry_failed_downloads", False)
+    if isinstance(retry_failed, bool):
+        retry_failed_str = "true" if retry_failed else "false"
+    else:
+        retry_failed_str = f'"{retry_failed}"'
 
     return f"""# ypm Global Settings
 
 # Prompts asking if you have pulled before confirming push.
 safety_check_before_push = {safety}
+
+# Before 'push' sends changes to a section's linked playlist, warn (and ask you to
+# confirm) if that section's '## ' header link doesn't look like a well-formed
+# YouTube playlist link (e.g. https://www.youtube.com/playlist?list=PLHd4hClFlvuw...).
+# This catches typos/mangled links before they get pushed to the wrong playlist.
+warn_on_malformed_section_links = {warn_links}
 
 # Max playlists in CLI menu ("all" for all).
 menu_playlist_count = {menu_p_str}
@@ -140,9 +175,36 @@ pull_method = "{pull_m}"
 # Auto uses yt-dlp when possible and api as a fallback.
 link_method = "{link_m}"
 
+# Cache OAuth tokens in data/ so you don't have to log in on every run.
+cache_oauth_tokens = {cache_tokens}
+
 # Custom executable paths (blank = auto-detect).
 ytdlp_path = "{ytdlp}"
 ffmpeg_path = "{ffmpeg}"
+js_runtime_path = "{js_rt_path}"
+
+# Path to a Netscape-format cookies.txt file for yt-dlp.
+# (Note: dropping 'cookies.txt' directly into the 'data/' folder is auto-detected).
+cookies_file = "{cookies_file}"
+
+# Browser to extract cookies from for yt-dlp ("firefox", "edge", "chrome", "brave", etc., or blank).
+# Firefox is recommended if your browser is open; Chromium browsers lock their database while open.
+ytdlp_cookies_from_browser = "{cookies_browser}"
+
+# Custom player client for yt-dlp (e.g. "default", "mweb", "ios", "android", or blank for yt-dlp default).
+ytdlp_player_client = "{player_client}"
+
+# Seconds to sleep between completed video downloads (0 disables).
+ytdlp_sleep_interval = {sleep_int}
+
+# Seconds to wait before each individual HTTP sub-request (0 disables).
+# Keep at 0 to prevent excessive delays during thumbnail and format checks.
+ytdlp_sleep_requests = {sleep_req}
+
+# Automatically retry tracks that previously failed to download (e.g. copyright blocked,
+# age-restricted, or deleted). Options: false (default, automatically skip them),
+# true (always retry them), "ask" (prompt each time).
+retry_failed_downloads = {retry_failed_str}
 """
 
 
@@ -150,6 +212,7 @@ def load_settings():
     """Loads settings.toml safely, recreating with defaults if missing or corrupted."""
     default_settings = {
         "safety_check_before_push": True,
+        "warn_on_malformed_section_links": True,
         "menu_playlist_count": 3,
         "menu_client_count": 3,
         "enable_logging": True,
@@ -157,8 +220,17 @@ def load_settings():
         "clickable_links_in_playlist_files": False,
         "pull_method": "auto",
         "link_method": "auto",
+        "cache_oauth_tokens": True,
         "ytdlp_path": "",
-        "ffmpeg_path": ""
+        "ffmpeg_path": "",
+        "js_runtime_path": "",
+        "cookies_file": "",
+        "cookies_from_browser": "",
+        "ytdlp_cookies_from_browser": "",
+        "ytdlp_player_client": "",
+        "ytdlp_sleep_interval": 0,
+        "ytdlp_sleep_requests": 0,
+        "retry_failed_downloads": False,
     }
     if not os.path.exists(SETTINGS_FILE):
         print(f"[*] Settings file not found. Creating default '{SETTINGS_FILE}'...")
@@ -171,6 +243,7 @@ def load_settings():
             if not isinstance(settings, dict):
                 raise ValueError("Settings file must contain a TOML table.")
             settings.setdefault("safety_check_before_push", True)
+            settings.setdefault("warn_on_malformed_section_links", True)
             settings.setdefault("menu_playlist_count", 3)
             settings.setdefault("menu_client_count", 3)
             settings.setdefault("enable_logging", True)
@@ -178,8 +251,17 @@ def load_settings():
             settings.setdefault("clickable_links_in_playlist_files", False)
             settings.setdefault("pull_method", "auto")
             settings.setdefault("link_method", "auto")
+            settings.setdefault("cache_oauth_tokens", True)
             settings.setdefault("ytdlp_path", "")
             settings.setdefault("ffmpeg_path", "")
+            settings.setdefault("js_runtime_path", "")
+            settings.setdefault("cookies_file", "")
+            c_browser = (settings.get("cookies_from_browser") or settings.get("ytdlp_cookies_from_browser") or "").strip()
+            settings["cookies_from_browser"] = c_browser
+            settings["ytdlp_cookies_from_browser"] = c_browser
+            settings.setdefault("ytdlp_player_client", "")
+            settings.setdefault("ytdlp_sleep_interval", 0)
+            settings.setdefault("ytdlp_sleep_requests", 0)
             return settings
     except (tomllib.TOMLDecodeError, ValueError, OSError) as e:
         backup_file = f"{SETTINGS_FILE}.corrupted.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
@@ -218,22 +300,6 @@ def load_playlist_data():
     }
 
     target_file = PLAYLISTS_DATA_FILE
-
-    if not os.path.exists(target_file):
-        for legacy_file in LEGACY_PLAYLISTS_DATA_FILES:
-            if os.path.exists(legacy_file) and legacy_file != target_file:
-                try:
-                    os.replace(legacy_file, target_file)
-                    print(f"[*] Migrated playlist data from '{legacy_file}' to '{target_file}'.")
-                    break
-                except OSError:
-                    try:
-                        shutil.copyfile(legacy_file, target_file)
-                        os.remove(legacy_file)
-                        print(f"[*] Migrated playlist data from '{legacy_file}' to '{target_file}'.")
-                        break
-                    except OSError:
-                        pass
 
     if not os.path.exists(target_file):
         save_playlist_data(default_data)
@@ -312,8 +378,46 @@ def _format_playlist_settings_toml(all_settings):
         '#',
         '# How each video line is written in the playlist .txt file (run `pull` after changing it).',
         '# %(id)s is always first. Optional, reorderable fields: %(title)s, %(channel)s, %(duration)s',
-        '# Example: "%(id)s | %(title)s | %(channel)s | %(duration)s"',
+        '# You can use shorthand (e.g. "id, title, channel") or the full %(field)s syntax.',
+        '# Example: "id, title"  or  "%(id)s | %(title)s"',
         '# playlist_entry_format = "%(id)s | %(title)s"',
+        '#',
+        '# Custom folder for this playlist\'s downloads (blank = <downloads_dir>/<playlist name>)',
+        '# download_path = "D:/Music/MyPlaylist"',
+        '#',
+        '# Which name to use for the "everything" download folder in download_mode = "all"',
+        '# (previously always called "FULL_PLAYLIST"). "alias" = use the playlist\'s own',
+        '# name/alias (default). "header" = use the title from the "### " header in the .txt file.',
+        '# folder_name_source = "alias"',
+        '#',
+        '# Write playlists/<name>.txt atomically (safe, default) or directly in-place ("direct write").',
+        '# Direct writes are slightly faster but can leave a corrupted/truncated file if interrupted.',
+        '# atomic_writes = true',
+        '#',
+        '# Prefix section download folders with their order in the .txt file ("01 - Chill", "02 - Hype")',
+        '# number_section_folders = false',
+        '#',
+        '# oauth-client (from oauth-clients/<name>.json) to use automatically for this playlist,',
+        '# so you are not prompted every time. Leave blank to be asked/auto-selected as usual.',
+        '# oauth_client = "project-a"',
+        '#',
+        '# Google account email to always use for this playlist (e.g. "user@gmail.com").',
+        '# Logins are cached per account in data/tokens/. Leave blank to pick from your',
+        '# cached accounts (or log in with a new one) each time. --account overrides this.',
+        '# account = "user@gmail.com"',
+        '#',
+        '# Path to a Netscape-formatted cookies.txt file specifically for this playlist.',
+        '# cookies_file = "data/cookies.txt"',
+        '#',
+        '# Browser to extract cookies from specifically for this playlist ("chrome", "firefox", "edge", etc.).',
+        '# cookies_from_browser = "firefox"',
+        '#',
+        '# Custom player client for yt-dlp ("default", "mweb", "ios", "android", or blank for default).',
+        '# ytdlp_player_client = ""',
+        '#',
+        '# When `format` fills in a section header, also include the linked section playlist\'s',
+        '# real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"',
+        '# include_playlist_name_in_sections = false',
         '',
         ''
     ]
@@ -337,6 +441,16 @@ def _format_playlist_settings_toml(all_settings):
         entry_fmt = normalize_playlist_entry_format(
             entry.get("playlist_entry_format", DEFAULT_PLAYLIST_SETTINGS["playlist_entry_format"])
         )
+        dl_path = entry.get("download_path", "")
+        folder_src = entry.get("folder_name_source", DEFAULT_PLAYLIST_SETTINGS["folder_name_source"])
+        atomic_w = "true" if entry.get("atomic_writes", DEFAULT_PLAYLIST_SETTINGS["atomic_writes"]) else "false"
+        num_sec_f = "true" if entry.get("number_section_folders", DEFAULT_PLAYLIST_SETTINGS["number_section_folders"]) else "false"
+        oauth_c = entry.get("oauth_client", "") or ""
+        account_v = entry.get("account", "") or ""
+        inc_pl_name = "true" if entry.get("include_playlist_name_in_sections", DEFAULT_PLAYLIST_SETTINGS["include_playlist_name_in_sections"]) else "false"
+        ck_file = entry.get("cookies_file", "") or ""
+        ck_browser = entry.get("cookies_from_browser", "") or ""
+        yt_client = entry.get("ytdlp_player_client", "") or ""
 
         lines.append(f'download-format = "{fmt}"')
         lines.append(f'embed_thumbnail = {thumb}')
@@ -344,10 +458,30 @@ def _format_playlist_settings_toml(all_settings):
         lines.append(f'push_mode = "{push_m}"')
         lines.append(f'download_mode = "{dl_m}"')
         lines.append(f'playlist_entry_format = "{entry_fmt}"')
+        # These are always written (even at their default) so they're visible and
+        # editable in the file - previously they were hidden unless already
+        # non-default, which made them look unsupported.
+        lines.append(f'download_path = "{dl_path}"')
+        lines.append(f'folder_name_source = "{folder_src}"')
+        lines.append(f'atomic_writes = {atomic_w}')
+        lines.append(f'number_section_folders = {num_sec_f}')
+        lines.append(f'oauth_client = "{oauth_c}"')
+        lines.append(f'account = "{account_v}"')
+        lines.append(f'include_playlist_name_in_sections = {inc_pl_name}')
+        lines.append(f'cookies_file = "{ck_file}"')
+        lines.append(f'cookies_from_browser = "{ck_browser}"')
+        lines.append(f'ytdlp_player_client = "{yt_client}"')
 
         # Any extra custom keys
+        known_written_keys = (
+            "format", "download-format", "embed_thumbnail", "number_files", "push_mode",
+            "download_mode", "playlist_entry_format", "download_path", "folder_name_source",
+            "atomic_writes", "number_section_folders", "oauth_client", "account",
+            "include_playlist_name_in_sections", "cookies_file", "cookies_from_browser",
+            "ytdlp_player_client",
+        )
         for k, v in entry.items():
-            if k in ("format", "download-format", "embed_thumbnail", "number_files", "push_mode", "download_mode", "playlist_entry_format"):
+            if k in known_written_keys:
                 continue
             if isinstance(v, bool):
                 v_str = "true" if v else "false"
@@ -365,33 +499,6 @@ def _format_playlist_settings_toml(all_settings):
 
 def load_all_playlist_settings():
     """Loads playlist-settings.toml containing per-playlist preferences."""
-
-    # Legacy migration: check old playlist-folder TOML/JSON settings files.
-    if not os.path.exists(PLAYLIST_SETTINGS_FILE):
-        for legacy_path in LEGACY_PLAYLIST_SETTINGS_FILES:
-            if os.path.exists(legacy_path):
-                try:
-                    if legacy_path.endswith(".toml"):
-                        with open(legacy_path, "rb") as f:
-                            old_data = tomllib.load(f)
-                    else:
-                        with open(legacy_path, "r", encoding="utf-8") as f:
-                            old_data = json.load(f)
-                    if isinstance(old_data, dict):
-                        cleaned = {
-                            k: v for k, v in old_data.items()
-                            if k != SETTINGS_INFO_KEY and not k.startswith("_") and isinstance(v, dict)
-                        }
-                        save_all_playlist_settings(cleaned)
-                        print(f"[*] Migrated playlist settings from '{legacy_path}' to '{PLAYLIST_SETTINGS_FILE}'.")
-                    try:
-                        os.remove(legacy_path)
-                    except OSError:
-                        pass
-                    break
-                except Exception as e:
-                    print(f"[!] Warning: Failed migrating legacy settings from '{legacy_path}': {e}")
-
     if not os.path.exists(PLAYLIST_SETTINGS_FILE):
         return {}
 
@@ -428,10 +535,7 @@ def save_all_playlist_settings(all_settings):
 def load_playlist_settings(playlist_name):
     """
     Loads settings for a specific playlist from playlist-settings.toml.
-    - Fills in any missing settings with defaults.
-    - Migrates the old 'format' key to 'download-format'.
-    - Migrates format/embed_thumbnail/number_files from legacy download settings files.
-    - Repairs 'playlist_entry_format' (id first, supported fields only, " | " separators).
+    Fills in any missing settings with defaults and repairs 'playlist_entry_format'.
     """
     if playlist_name == SETTINGS_INFO_KEY:
         return dict(DEFAULT_PLAYLIST_SETTINGS)
@@ -440,40 +544,8 @@ def load_playlist_settings(playlist_name):
     entry = all_settings.get(playlist_name)
     save_needed = False
 
-    known_keys = set(DEFAULT_PLAYLIST_SETTINGS) | {"format"}
-    is_new_entry = not isinstance(entry, dict) or not any(k in entry for k in known_keys)
     if not isinstance(entry, dict):
         entry = {}
-
-    # Rename legacy 'format' -> 'download-format'
-    if "format" in entry:
-        legacy_format = str(entry.pop("format")).strip().lower()
-        if "download-format" not in entry and legacy_format:
-            entry["download-format"] = legacy_format
-        save_needed = True
-
-    # Brand-new entry: try to import old per-playlist download settings
-    if is_new_entry:
-        from .parser import sanitize_filename
-        safe_name = sanitize_filename(playlist_name)
-        dl_dir = os.path.join(DOWNLOADS_DIR, safe_name)
-        for legacy_name in ("_manifest.json", "_setting.json", "_settings.json"):
-            legacy_file = os.path.join(dl_dir, legacy_name)
-            if os.path.isfile(legacy_file):
-                try:
-                    with open(legacy_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, dict):
-                        if data.get("format"):
-                            entry["download-format"] = str(data["format"]).lower()
-                        if "embed_thumbnail" in data:
-                            entry["embed_thumbnail"] = bool(data["embed_thumbnail"])
-                        if "number_files" in data:
-                            entry["number_files"] = bool(data["number_files"])
-                    break
-                except Exception:
-                    pass
-        save_needed = True
 
     # Fill in missing defaults
     for k, v in DEFAULT_PLAYLIST_SETTINGS.items():
@@ -482,9 +554,38 @@ def load_playlist_settings(playlist_name):
             save_needed = True
 
     # Normalize types in case the user edited the TOML with strings for booleans
-    for key in ("embed_thumbnail", "number_files"):
+    for key in ("embed_thumbnail", "number_files", "atomic_writes", "number_section_folders",
+                "include_playlist_name_in_sections"):
         if isinstance(entry.get(key), str):
             entry[key] = entry[key].strip().lower() in ("true", "1", "yes")
+
+    # Normalize case/whitespace on the mode strings. A stray typo like "Sections_Only"
+    # or trailing whitespace would otherwise silently fail the exact-match checks in
+    # command_push/command_download and fall back to unexpected behavior (e.g. still
+    # pushing to the main playlist even though 'sections_only' was intended).
+    for key, allowed, fallback in (
+        ("push_mode", ("all", "main_only", "sections_only"), "all"),
+        ("download_mode", ("main_only", "all", "sections_only"), "main_only"),
+    ):
+        raw_val = entry.get(key)
+        if isinstance(raw_val, str):
+            clean_val = raw_val.strip().lower()
+            if clean_val != raw_val:
+                entry[key] = clean_val
+                save_needed = True
+            if clean_val not in allowed:
+                print(f"[!] Warning: '{key}' = '{raw_val}' for '{playlist_name}' is not one of {allowed}; "
+                      f"using '{fallback}' instead. Fix this in '{PLAYLIST_SETTINGS_FILE}'.")
+                entry[key] = fallback
+                save_needed = True
+
+    for key in ("oauth_client", "account"):
+        if not isinstance(entry.get(key), str):
+            entry[key] = str(entry.get(key) or "")
+
+    pl_browser = (entry.get("cookies_from_browser") or entry.get("ytdlp_cookies_from_browser") or "").strip()
+    entry["cookies_from_browser"] = pl_browser
+    entry["ytdlp_cookies_from_browser"] = pl_browser
 
     # Repair the entry format if needed
     raw_fmt = entry.get("playlist_entry_format")

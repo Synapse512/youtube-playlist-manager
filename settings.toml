@@ -29,3 +29,28 @@ link_method = "auto"
 # Custom executable paths (blank = auto-detect).
 ytdlp_path = ""
 ffmpeg_path = ""
+
+# Path to a Netscape-formatted cookies.txt file for yt-dlp.
+# (Note: dropping 'cookies.txt' directly into the 'data/' folder is auto-detected).
+cookies_file = ""
+
+# Browser to extract cookies from for yt-dlp ("firefox", "edge", "chrome", "brave", etc., or blank).
+# Firefox is recommended if your browser is open; Chromium browsers lock their database while open.
+# (Both 'cookies_from_browser' and 'ytdlp_cookies_from_browser' are supported).
+cookies_from_browser = ""
+ytdlp_cookies_from_browser = ""
+
+# Custom player client for yt-dlp (e.g. "default", "mweb", "ios", "android", or blank for yt-dlp default).
+ytdlp_player_client = ""
+
+# Seconds to sleep between completed video downloads (0 disables).
+ytdlp_sleep_interval = 0
+
+# Seconds to wait before each individual HTTP sub-request (0 disables).
+# Keep at 0 to prevent excessive delays during thumbnail and format checks.
+ytdlp_sleep_requests = 0
+
+# Automatically retry tracks that previously failed to download (e.g. copyright blocked,
+# age-restricted, or deleted). Options: false (default, automatically skip them),
+# true (always retry them), "ask" (prompt each time).
+retry_failed_downloads = false

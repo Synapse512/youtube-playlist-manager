@@ -25,6 +25,7 @@ from .parser import (
     get_playlist_name_for_target,
     parse_playlist_file,
     save_playlist_file,
+    playlist_link_format_issue,
 )
 from .sync import compute_minimal_moves
 
@@ -89,14 +90,28 @@ def _enrich_metadata_via_api(youtube, video_ids, video_metadata, required_fields
     return units
 
 
-def _resolve_command_client(args):
+def _resolve_command_client(args, default_client=None, default_account=None):
     """
-    Resolves which oauth-client JSON to use for this operation.
-    Nothing is remembered between runs - the oauth-client is picked fresh every
-    time (unless --client is passed or only one oauth-client exists).
+    Resolves which oauth-client JSON to use for this operation, and which Google
+    account to authenticate as (for token-cache keying).
+    Account priority: --account flag > playlist "account" setting > picker in get_youtube_service.
+    Client priority: --client flag > this playlist's 'oauth_client' setting (see
+    playlist-settings.toml) > auto-select (if only one exists) > interactive prompt.
+    Returns (client_name, account) where account may be an empty string.
     """
     explicit_client = getattr(args, "client", None)
-    return resolve_oauth_client(explicit_client, allow_prompt=True)
+    if not explicit_client and default_client:
+        default_client = str(default_client).strip()
+        if default_client:
+            from .auth import get_oauth_clients
+            if default_client in get_oauth_clients():
+                print(f"[*] Using this playlist's configured oauth client: '{default_client}'")
+                explicit_client = default_client
+            else:
+                print(f"[!] Warning: playlist's configured oauth_client '{default_client}' was not found "
+                      f"in 'oauth-clients/' - falling back to normal selection.")
+    account = (getattr(args, "account", None) or default_account or "").strip()
+    return resolve_oauth_client(explicit_client, allow_prompt=True), account
 
 
 def command_link(args, settings, playlist_data):
@@ -122,6 +137,13 @@ def command_link(args, settings, playlist_data):
         print(f"[!] Error: Could not extract a valid Playlist ID from '{raw_id}'.")
         return
 
+    # Already linked? Check by playlist ID first, before any yt-dlp / API call.
+    for existing_name, existing_id in playlist_data.get("playlists", {}).items():
+        if existing_id == playlist_id:
+            print(f"[*] This playlist is already linked as '{existing_name}' (ID: {playlist_id}). Nothing to do.")
+            print(f"    Use 'python main.py pull {existing_name}' to sync it, or 'unlink' first to re-link it.")
+            return
+
     link_method = (getattr(args, "method", None) or settings.get("link_method", "auto")).strip().lower()
     explicit_client = getattr(args, "client", None)
     if explicit_client:
@@ -141,13 +163,16 @@ def command_link(args, settings, playlist_data):
             if link_method == "ytdlp":
                 print(f"[!] Error: Could not fetch playlist title via yt-dlp. Make sure the playlist is public/unlisted.")
                 return
-            print(f"[*] yt-dlp could not access playlist title (it may be private). Falling back to YouTube API...")
+            from . import downloader as _dl
+            reason = _dl.LAST_YTDLP_ERROR or "unknown reason"
+            print(f"[*] yt-dlp could not get the playlist title: {reason}")
+            print(f"[*] Falling back to YouTube API...")
 
     if not playlist_name:
-        oauth_client = _resolve_command_client(args)
+        oauth_client, account = _resolve_command_client(args)
         method_used = f"YouTube API ({oauth_client})"
         print(f"[*] Fetching playlist title from YouTube API ({playlist_id})...")
-        youtube = get_youtube_service(oauth_client)
+        youtube = get_youtube_service(oauth_client, account=account)
         try:
             res = youtube.playlists().list(part="snippet", id=playlist_id).execute()
             items = res.get("items", [])
@@ -182,7 +207,7 @@ def command_link(args, settings, playlist_data):
     if not os.path.exists(file_path):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"## https://www.youtube.com/playlist?list={playlist_id} | {playlist_name}\n\n")
+                f.write(f"### https://www.youtube.com/playlist?list={playlist_id} | {playlist_name}\n\n")
             print(f"[+] Created initial playlist file '{file_path}'.")
         except OSError as e:
             print(f"[!] Warning: Could not create initial file '{file_path}': {e}")
@@ -214,7 +239,7 @@ def command_link(args, settings, playlist_data):
         "link",
         oauth_client or method_used,
         summary_lines=[f"Linked '{playlist_name}' -> Playlist ID '{playlist_id}' via {method_used}"],
-        playlist_data=playlist_data
+        playlist_data=playlist_data,
     )
 
 
@@ -354,8 +379,8 @@ def command_pull(args, settings, playlist_data):
 
     if pulled_video_ids is None:
         # Resolve which oauth-client JSON to use for this operation
-        oauth_client = _resolve_command_client(args)
-        youtube = get_youtube_service(oauth_client)
+        oauth_client, account = _resolve_command_client(args, default_client=pl_settings.get("oauth_client"), default_account=pl_settings.get("account"))
+        youtube = get_youtube_service(oauth_client, account=account)
         print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' via YouTube API...")
 
         next_page_token = None
@@ -529,16 +554,16 @@ def command_pull(args, settings, playlist_data):
         for sec in existing_sections_data.get("sections", []):
             sec["video_ids"] = [v for v in sec.get("video_ids", []) if v not in deleted_ids_set]
 
-        # Put new tracks into ## Uncategorized section at the end
+        # Put new tracks into ## Unorganized section at the end
         if new_inserted_ids:
-            uncategorized = None
+            unorganized = None
             for sec in existing_sections_data.get("sections", []):
-                if sec.get("title", "").strip().lower() in ("uncategorized", "sectionless"):
-                    uncategorized = sec
+                if sec.get("title", "").strip().lower() in ("unorganized", "uncategorized", "sectionless"):
+                    unorganized = sec
                     break
-            if uncategorized is None:
-                uncategorized = {
-                    "title": "Uncategorized",
+            if unorganized is None:
+                unorganized = {
+                    "title": "Unorganized",
                     "playlist_id": None,
                     "url": None,
                     "video_ids": [],
@@ -546,11 +571,11 @@ def command_pull(args, settings, playlist_data):
                     "header_blank_above": True,
                     "is_implicit": False,
                 }
-                existing_sections_data["sections"].append(uncategorized)
+                existing_sections_data["sections"].append(unorganized)
 
             for new_v in new_inserted_ids:
-                if new_v not in uncategorized["video_ids"]:
-                    uncategorized["video_ids"].append(new_v)
+                if new_v not in unorganized["video_ids"]:
+                    unorganized["video_ids"].append(new_v)
 
         if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
             return
@@ -588,7 +613,7 @@ def command_pull(args, settings, playlist_data):
             f"{inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered"
         ],
         detail_lines=diff_details if diff_details else ["No changes required (already in sync)"],
-        playlist_data=playlist_data
+        playlist_data=playlist_data,
     )
 
 def _sync_single_playlist_to_youtube(
@@ -603,18 +628,48 @@ def _sync_single_playlist_to_youtube(
     file_path=None,
     blank_above=None,
     sections_data=None,
+    log_playlist_name=None,
+    section_title=None,
 ):
     """
     Synchronizes a single YouTube playlist with a target list of video IDs and titles.
     Performs deletion, insertion, and minimal-moves reordering.
     Returns (success, resolved_titles).
     """
+    from .downloader import fetch_playlist_tracks_ytdlp
+
+    effective_log_name = log_playlist_name or playlist_name
+
+    # Optimization: Zero-quota check if pull_method in ('auto', 'ytdlp')
+    pull_method = (settings.get("pull_method", "auto") or "auto").strip().lower()
+    if pull_method in ("auto", "ytdlp"):
+        print(f"[*] Checking if '{playlist_name}' is already in sync using yt-dlp (0 API quota)...")
+        ytdlp_ids, ytdlp_titles, _ = fetch_playlist_tracks_ytdlp(playlist_id, settings)
+        if ytdlp_ids is not None and ytdlp_ids == target_video_ids:
+            print(f"[+] '{playlist_name}' is already completely in sync on YouTube (0 API quota used)!")
+            op_name = f"push [{section_title}]" if section_title else "push"
+            record_activity(playlist_data, effective_log_name, op_name)
+            log_playlist_event(
+                settings,
+                effective_log_name,
+                op_name,
+                "yt-dlp (0 quota)",
+                summary_lines=[f"0 inserted, 0 deleted, 0 reordered (0 quota units - verified with yt-dlp)"],
+                detail_lines=[f"Playlist '{playlist_name}' is already in sync with local file."],
+                playlist_data=playlist_data,
+            )
+            resolved_titles = {}
+            for vid_id in target_video_ids:
+                resolved_titles[vid_id] = ytdlp_titles.get(vid_id) or target_video_titles.get(vid_id) or "Untitled Video"
+            return True, resolved_titles
+
     print(f"[*] Fetching current live playlist from YouTube ({playlist_id})...")
 
     current_items = []
     next_page_token = None
     page_num = 1
     list_units = 0
+
 
     try:
         while True:
@@ -644,11 +699,12 @@ def _sync_single_playlist_to_youtube(
     except HttpError as e:
         if "quotaExceeded" in str(e) or (hasattr(e, "resp") and e.resp.status == 403):
             print(f"\n[!] YouTube API daily quota limit reached while reading playlist '{playlist_name}'.")
-            record_activity(playlist_data, playlist_name, "push (quota exceeded)")
+            op_name = f"push [{section_title}]" if section_title else "push"
+            record_activity(playlist_data, effective_log_name, op_name + " (quota exceeded)")
             log_playlist_event(
                 settings,
-                playlist_name,
-                "push (ABANDONED - QUOTA EXCEEDED)",
+                effective_log_name,
+                op_name + " (ABANDONED - QUOTA EXCEEDED)",
                 oauth_client,
                 summary_lines=[
                     f"Push abandoned: YouTube API daily quota limit reached during initial track fetch for '{playlist_name}'",
@@ -675,6 +731,7 @@ def _sync_single_playlist_to_youtube(
     deleted_details = []
     inserted_details = []
     moved_details = []
+    op_name = f"push [{section_title}]" if section_title else "push"
 
     def _handle_quota_exceeded(phase_name):
         list_q = list_units * 1
@@ -700,12 +757,12 @@ def _sync_single_playlist_to_youtube(
             save_playlist_file(file_path, partial_vids, partial_titles, blank_above=blank_above, sections_data=sections_data)
             print(f"[*] Updated local file '{file_path}' to match YouTube's current state.")
 
-        record_activity(playlist_data, playlist_name, "push (quota exceeded)")
+        record_activity(playlist_data, effective_log_name, op_name + " (quota exceeded)")
         diff_d = deleted_details + inserted_details + moved_details
         log_playlist_event(
             settings,
-            playlist_name,
-            "push (ABANDONED - QUOTA EXCEEDED)",
+            effective_log_name,
+            op_name + " (ABANDONED - QUOTA EXCEEDED)",
             oauth_client,
             summary_lines=[
                 f"Push abandoned: YouTube API daily quota limit reached during {phase_name} for '{playlist_name}'",
@@ -850,12 +907,12 @@ def _sync_single_playlist_to_youtube(
     print("=" * 60)
     print(f"[+] '{playlist_name}' synchronization complete!\n")
 
-    record_activity(playlist_data, playlist_name, "push")
+    record_activity(playlist_data, effective_log_name, op_name)
     diff_details = deleted_details + inserted_details + moved_details
     log_playlist_event(
         settings,
-        playlist_name,
-        "push",
+        effective_log_name,
+        op_name,
         oauth_client,
         summary_lines=[
             f"{inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered ({total_quota} quota units)"
@@ -911,15 +968,26 @@ def command_push(args, settings, playlist_data):
 
     # Load push mode setting from playlist-settings.toml
     pl_settings = load_playlist_settings(playlist_name)
-    push_mode = pl_settings.get("push_mode", "all")  # "all", "main_only", "sections_only"
+    # Normalize like the boolean settings - a stray case/whitespace difference here
+    # (e.g. "Sections_Only" or "sections_only " typed by hand) would silently fail
+    # the `in (...)` checks below and fall through to pushing the main playlist.
+    push_mode = str(pl_settings.get("push_mode", "all") or "all").strip().lower()
+    if push_mode not in ("all", "main_only", "sections_only"):
+        print(f"[!] Warning: Unrecognized push_mode '{push_mode}' for '{playlist_name}' - defaulting to 'all'.")
+        push_mode = "all"
 
-    # Resolve OAuth client
-    oauth_client = _resolve_command_client(args)
-    youtube = get_youtube_service(oauth_client)
+    # Resolve OAuth client - prefer a playlist-specific default (see 'oauth_client'
+    # in playlist-settings.toml) so you don't have to pick it every time.
+    oauth_client, account = _resolve_command_client(args, default_client=pl_settings.get("oauth_client"), default_account=pl_settings.get("account"))
+    youtube = get_youtube_service(oauth_client, account=account)
 
     is_sectioned = sections_data.get("is_sectioned", False)
     sections = sections_data.get("sections", [])
 
+    if is_sectioned and push_mode == "sections_only":
+        print(f"[*] push_mode = 'sections_only' -> the main playlist ('{playlist_id}') will NOT be pushed to.")
+
+    any_section_pushed = False
     # 1. If sectioned and push_mode in ("all", "sections_only"), push each linked section
     if is_sectioned and push_mode in ("all", "sections_only"):
         for sec in sections:
@@ -928,24 +996,61 @@ def command_push(args, settings, playlist_data):
             sec_id = sec.get("playlist_id")
             sec_title = sec.get("title", "Section")
             sec_vids = sec.get("video_ids", [])
-            if sec_id:
-                print(f"\n[+] Pushing section '{sec_title}' -> YouTube Playlist: {sec_id}")
-                _sync_single_playlist_to_youtube(
-                    youtube,
-                    sec_id,
-                    f"{playlist_name} [{sec_title}]",
-                    sec_vids,
-                    target_video_titles,
-                    oauth_client,
-                    settings,
-                    playlist_data
-                )
-            else:
+            if not sec_id:
                 print(f"\n[*] Section '{sec_title}' has no linked playlist ID (skipped section push).")
+                continue
+            if sec_id == playlist_id:
+                # Safety guard: a section header accidentally pointing at the SAME
+                # playlist ID as the main playlist would otherwise silently push
+                # section changes straight into the main playlist.
+                print(f"\n[!] Warning: Section '{sec_title}' is linked to the SAME playlist ID as the main "
+                      f"playlist ('{playlist_id}'). Skipping this section to avoid overwriting the main playlist - "
+                      f"check the '## ' header for '{sec_title}' in '{file_path}'.")
+                continue
+
+            # Safety guard: it's very easy to paste a mistyped, truncated, or
+            # otherwise-wrong link when hand-writing a section header. A link that
+            # LOOKS valid but points at the wrong playlist would still push real
+            # inserts/deletes/reorders to it, so pause here and make sure the user
+            # actually means it before sending anything.
+            link_issue = playlist_link_format_issue(sec)
+            if link_issue and settings.get("warn_on_malformed_section_links", True):
+                print("\n" + "=" * 60)
+                print(f" [!] Section '{sec_title}' has a possibly-wrong playlist link")
+                print("=" * 60)
+                print(f"  Problem: {link_issue}")
+                print(f"  Expected format: https://www.youtube.com/playlist?list=PLHd4hClFlvuw...")
+                print(f"  ypm would push local changes to Playlist ID: '{sec_id}'")
+                print("=" * 60)
+                confirm_link = input("  Continue pushing to this playlist anyway? (y/N): ").strip().lower()
+                if confirm_link != 'y':
+                    print(f"[!] Skipped pushing section '{sec_title}' - fix the '## ' header link in "
+                          f"'{file_path}' and try again.")
+                    continue
+
+            print(f"\n[+] Pushing section '{sec_title}' -> YouTube Playlist: {sec_id}")
+            _sync_single_playlist_to_youtube(
+                youtube,
+                sec_id,
+                f"{playlist_name} [{sec_title}]",
+                sec_vids,
+                target_video_titles,
+                oauth_client,
+                settings,
+                playlist_data,
+                log_playlist_name=playlist_name,
+                section_title=sec_title
+            )
+            any_section_pushed = True
 
     # 2. Push main playlist if push_mode in ("all", "main_only")
     resolved_titles = {}
     if not is_sectioned or push_mode in ("all", "main_only"):
+        if is_sectioned and push_mode == "sections_only":
+            # Should be unreachable (this branch only runs when not is_sectioned in
+            # sections_only mode) - but if it's ever hit, make sure it's not silent.
+            print(f"[!] Warning: push_mode is 'sections_only' but no explicit sections were found in "
+                  f"'{file_path}' - falling back to pushing the main playlist so nothing is lost.")
         print(f"\n[+] Pushing main playlist '{playlist_name}' -> YouTube Playlist: {playlist_id}")
         ok, res_titles = _sync_single_playlist_to_youtube(
             youtube,
@@ -962,31 +1067,15 @@ def command_push(args, settings, playlist_data):
         )
         if ok:
             resolved_titles = res_titles
+    elif is_sectioned and push_mode == "sections_only" and not any_section_pushed:
+        print(f"\n[!] push_mode is 'sections_only' but no section has a valid linked playlist ID - "
+              f"nothing was pushed to YouTube for '{playlist_name}'.")
 
-    # Normalize and update local text file (fields per playlist_entry_format)
-    if not resolved_titles:
-        for vid in target_video_ids:
-            resolved_titles[vid] = target_video_titles.get(vid) or "Untitled Video"
-
-    # Newly added tracks (e.g. pasted URLs) have no channel/duration yet - fill them in.
-    from .downloader import find_missing_metadata, fill_missing_metadata
-    entry_fields = playlist_entry_format_fields(pl_settings.get("playlist_entry_format"))
-    video_metadata = sections_data.setdefault("video_metadata", {})
-    for vid, title in resolved_titles.items():
-        meta = video_metadata.setdefault(vid, {"id": vid})
-        if title and title != "Untitled Video" and not meta.get("title"):
-            meta["title"] = title
-    missing_meta = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
-    if missing_meta:
-        answered = fill_missing_metadata(
-            target_video_ids, video_metadata, entry_fields, settings, playlist_id=playlist_id
-        )
-        unreachable = [v for v in missing_meta if v not in answered]
-        if unreachable:
-            _enrich_metadata_via_api(youtube, unreachable, video_metadata, entry_fields)
-
-    if save_playlist_file(file_path, target_video_ids, resolved_titles, blank_above=blank_above, sections_data=sections_data):
-        print(f"[+] Automatically updated and formatted local file '{file_path}'.")
+    # Normalize and update local text file by running the full format command.
+    # This ensures all formatting logic is applied consistently, including
+    # include_playlist_name_in_sections, metadata enrichment, and entry formatting.
+    print(f"\n[*] Running format on '{file_path}' to normalize local file...")
+    command_format(args, settings, playlist_data)
 
 
 def command_format(args, settings, playlist_data):
@@ -1029,6 +1118,7 @@ def command_format(args, settings, playlist_data):
                 print(f"[+] Formatted main header title: '{m_title}'")
 
     # Check and format section headers if any have playlist link without title
+    include_pl_name = pl_settings.get("include_playlist_name_in_sections", False)
     if sections_data.get("is_sectioned"):
         for sec in sections_data.get("sections", []):
             if sec.get("is_implicit"):
@@ -1039,6 +1129,20 @@ def command_format(args, settings, playlist_data):
                 if sec_title:
                     sec["title"] = sec_title
                     print(f"[+] Formatted section title: '{sec_title}' (0 API quota)")
+            # Optional: also record the section's *actual* linked-playlist title
+            # alongside your own custom section name, e.g.
+            # "## <url> | Chill Vibes | My Actual YouTube Playlist Title"
+            if include_pl_name and sec.get("playlist_id") and not sec.get("playlist_name"):
+                real_title = fetch_playlist_title_ytdlp(sec["playlist_id"], settings)
+                if real_title and real_title != sec.get("title"):
+                    sec["playlist_name"] = real_title
+                    print(f"[+] Added linked playlist name to section header: '{real_title}' (0 API quota)")
+
+            link_issue = playlist_link_format_issue(sec)
+            if link_issue and settings.get("warn_on_malformed_section_links", True):
+                print(f"[!] Heads up: section '{sec.get('title') or 'Section'}' has a possibly-wrong playlist "
+                      f"link ({link_issue}). This won't stop 'format', but 'push' will pause and ask before "
+                      f"sending anything to it.")
 
     video_metadata = sections_data.setdefault("video_metadata", {})
     missing_ids = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
@@ -1061,10 +1165,10 @@ def command_format(args, settings, playlist_data):
         unreachable = [v for v in missing_ids if v not in answered]
         if unreachable:
             print(f"[*] Falling back to YouTube Data API for {len(unreachable)} remaining track(s)...")
-            oauth_client = _resolve_command_client(args)
+            oauth_client, account = _resolve_command_client(args, default_client=pl_settings.get("oauth_client"), default_account=pl_settings.get("account"))
             method_used = "yt-dlp + YouTube API" if answered else "YouTube Data API"
             try:
-                youtube = get_youtube_service(oauth_client)
+                youtube = get_youtube_service(oauth_client, account=account)
                 quota_units += _enrich_metadata_via_api(youtube, unreachable, video_metadata, entry_fields)
             except Exception as e:
                 print(f"[!] Warning: YouTube API fallback failed: {e}")
@@ -1085,14 +1189,17 @@ def command_format(args, settings, playlist_data):
     print("\n" + "=" * 60)
     print(" Format Summary")
     print("=" * 60)
-    print(f"  * {'Method:':<22} {method_used}")
+    print(f"  * {'Method:':<24} {method_used}")
     if oauth_client:
-        print(f"  * {'OAuth Client:':<22} {oauth_client}")
-    print(f"  * {'Tracks Normalized:':<22} {len(target_video_ids):>4d} track(s)")
-    print(f"  * {'Entries Completed:':<22} {filled:>4d} track(s)")
-    if still_missing:
-        print(f"  * {'Still Incomplete:':<22} {len(still_missing):>4d} track(s)  (unavailable or no data on YouTube)")
-    print(f"  * {'API Quota Used:':<22} {quota_units:>4d} unit(s)")
+        print(f"  * {'OAuth Client:':<24} {oauth_client}")
+    print(f"  * {'Total Tracks:':<24} {len(target_video_ids):>4d} track(s)")
+    if missing_ids:
+        print(f"  * {'Metadata Enriched:':<24} {filled:>4d} track(s)")
+        if still_missing:
+            print(f"  * {'Unavailable / Deleted:':<24} {len(still_missing):>4d} track(s) (no data on YouTube)")
+    else:
+        print(f"  * {'Metadata Status:':<24} Up-to-date (all details present)")
+    print(f"  * {'API Quota Used:':<24} {quota_units:>4d} unit(s)")
     print("=" * 60 + "\n")
     record_activity(playlist_data, playlist_name, "format")
     log_playlist_event(

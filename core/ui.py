@@ -148,9 +148,12 @@ OAuth Client Setup:
   NOT a fixed user identity. Multiple oauth-client files can point at the same
   project (and therefore share its quota), and any oauth-client file can be used
   to log into any Google account.
-  No session tokens are cached: every command that talks to YouTube opens a fresh
-  browser login so you can pick the Google account you want for that run. If one
-  oauth-client's project runs out of daily quota, just re-run the command with a
+  OAuth logins are cached in data/tokens/, one per (oauth-client, Google account). The account
+  email is detected automatically after login. When you run a command that talks to YouTube,
+  you can pick from the accounts already cached for that client (no browser needed) or log in
+  with a new one. Use --account <email> or the 'account' key in playlist-settings.toml to skip
+  the picker. You only log in again when a token is missing or expired. Set cache_oauth_tokens = false in settings.toml to disable caching.
+  If one oauth-client's project runs out of daily quota, re-run the command with a
   different --client pointed at a project that still has quota left.
 
 Configuration:
@@ -160,7 +163,7 @@ Commands:
   menu          python main.py
                 Displays the welcome menu, recent playlists, and configured oauth clients.
 
-  link          python main.py link <id_or_url> [--method auto|ytdlp|api] [--client <name>]
+  link          python main.py link <id_or_url> [--method auto|ytdlp|api] [--client <name>] [--account <email>]
                 Connects a YouTube Playlist ID or URL using the title fetched from YouTube.
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
 
@@ -170,22 +173,22 @@ Commands:
   list          python main.py list
                 Displays all configured playlists with their last CLI edit info.
 
-  pull          python main.py pull [<name>] [--method auto|ytdlp|api] [--client <name>]
+  pull          python main.py pull [<name>] [--method auto|ytdlp|api] [--client <name>] [--account <email>]
                 Downloads the live YouTube playlist into playlists/<name>.txt.
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
                 (prompts to select playlist if omitted and multiple exist).
 
-  push          python main.py push [<name>] [--client <name>]
+  push          python main.py push [<name>] [--client <name>] [--account <email>]
                 Pushes local .txt additions, deletions, and track order to YouTube and
                 automatically formats URLs/IDs to <video_id> | <video_title> format
                 (prompts to select playlist if omitted and multiple exist).
 
-  format        python main.py format [<name>] [--client <name>]
+  format        python main.py format [<name>] [--client <name>] [--account <email>]
                 Normalizes URLs/IDs into <video_id> | <title> format for readability.
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
                 (prompts to select playlist if omitted and multiple exist).
 
-  download      python main.py download [<name>] [--format audio|video]
+  download      python main.py download [<name>] [--format audio|video] [--retry-failed] [--clear-failed] [--cookies <file>] [--cookies-from-browser <browser>] [--export-urls]
                 Downloads all tracks from playlists/<name>.txt using yt-dlp.
                 Audio mode downloads best quality in native format (no ffmpeg needed).
                 Video mode downloads MP4 video (requires ffmpeg).
@@ -201,6 +204,13 @@ Options:
                 oauth-clients/<name>.json). If omitted: auto-selected if only 1
                 oauth client exists, or prompted if multiple exist. This is never
                 remembered between runs - you choose it fresh every time.
+  --account, -a Google account email to use (skips the account picker). Must be a test user
+                on the oauth client's project. Overrides the playlist's 'account' setting.
+  --cookies     Path to Netscape-format cookies.txt file for yt-dlp.
+  --cookies-from-browser Browser to extract cookies from (e.g. firefox, edge, chrome).
+  --retry-failed Retry downloading tracks that previously failed.
+  --clear-failed Reset and clear all recorded failed tracks in the playlist manifest.
+  --export-urls Export playlist video URLs to urls.txt for direct yt-dlp usage.
   -h, --help    Print help
 """
     print(help_text)
