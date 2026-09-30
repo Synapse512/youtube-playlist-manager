@@ -80,6 +80,15 @@ def main():
         format_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         format_parser.add_argument("-h", "--help", action="store_true")
 
+        # Command: ai-format (aliases: ai-organize)
+        ai_parser = subparsers.add_parser("ai-format", aliases=["ai-organize"], add_help=False)
+        ai_parser.add_argument("target", nargs="?")
+        ai_parser.add_argument("--prompt", "-p", default=None, help="Custom instructions for AI organization and cleanup")
+        ai_parser.add_argument("--provider", default=None, help="AI provider override (openai, gemini, groq, openrouter, anthropic, ollama)")
+        ai_parser.add_argument("--model", "-m", default=None, help="Model override (e.g. gpt-4o-mini, claude-3-5-haiku, or your provider's model)")
+        ai_parser.add_argument("--dry-run", action="store_true", help="Preview AI organization changes without saving to disk")
+        ai_parser.add_argument("-h", "--help", action="store_true")
+
         # Command: download (supports --format audio/video, prompts if omitted)
         dl_parser = subparsers.add_parser("download", add_help=False)
         dl_parser.add_argument("target", nargs="?")
@@ -90,6 +99,14 @@ def main():
         dl_parser.add_argument("--cookies-from-browser", default=None, metavar="BROWSER", help="Browser to extract cookies from (e.g. firefox, edge, chrome)")
         dl_parser.add_argument("--export-urls", action="store_true", help="Export playlist track URLs to urls.txt for manual yt-dlp downloading")
         dl_parser.add_argument("-h", "--help", action="store_true")
+
+        # Command: config (aliases: settings, set)
+        cfg_parser = subparsers.add_parser("config", aliases=["settings", "set"], add_help=False)
+        cfg_parser.add_argument("key", nargs="?", default=None, help="Setting key to view or modify")
+        cfg_parser.add_argument("value", nargs="?", default=None, help="New value to set")
+        cfg_parser.add_argument("--playlist", "-p", default=None, help="Target playlist to view or modify playlist-specific settings")
+        cfg_parser.add_argument("--unset", "-u", action="store_true", help="Reset/clear the setting")
+        cfg_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: help
         help_parser = subparsers.add_parser("help", add_help=False)

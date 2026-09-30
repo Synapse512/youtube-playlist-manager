@@ -56,60 +56,8 @@
 # When `format` fills in a section header, also include the linked section playlist's
 # real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"
 # include_playlist_name_in_sections = false
+#
+# Custom instructions to automatically use for 'ai-format' without prompting
+# ai_prompt = "Group into sections by genre: Hip Hop, R&B, Rock, Ambient"
 
 
-["Forsaken OST (Roblox)"]
-download-format = "audio"
-embed_thumbnail = true
-number_files = true
-push_mode = "all"
-download_mode = "all"
-playlist_entry_format = "%(id)s | %(title)s"
-download_path = ""
-folder_name_source = "alias"
-atomic_writes = false
-number_section_folders = false
-oauth_client = ""
-account = ""
-include_playlist_name_in_sections = false
-cookies_file = ""
-cookies_from_browser = "firefox"
-ytdlp_player_client = ""
-
-
-["YT better than Spotify"]
-download-format = "audio"
-embed_thumbnail = true
-number_files = true
-push_mode = "sections_only"
-download_mode = "all"
-playlist_entry_format = "%(id)s | %(title)s"
-download_path = ""
-folder_name_source = "header"
-atomic_writes = false
-number_section_folders = true
-oauth_client = ""
-account = ""
-include_playlist_name_in_sections = true
-cookies_file = ""
-cookies_from_browser = ""
-ytdlp_player_client = ""
-
-
-[test512]
-download-format = "audio"
-embed_thumbnail = true
-number_files = true
-push_mode = "all"
-download_mode = "all"
-playlist_entry_format = "%(id)s | %(title)s"
-download_path = ""
-folder_name_source = "alias"
-atomic_writes = true
-number_section_folders = false
-oauth_client = ""
-account = ""
-include_playlist_name_in_sections = false
-cookies_file = ""
-cookies_from_browser = ""
-ytdlp_player_client = ""

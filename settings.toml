@@ -1,13 +1,28 @@
 # ypm Global Settings
 
-# Prompts asking if you have pulled before confirming push. 
+# Prompts asking if you have pulled before confirming push.
 safety_check_before_push = true
 
-# Max playlists in CLI menu ("all" to list all).
+# Before 'push' sends changes to a section's linked playlist, warn (and ask you to
+# confirm) if that section's '## ' header link doesn't look like a well-formed
+# YouTube playlist link (e.g. https://www.youtube.com/playlist?list=PLHd4hClFlvuw...).
+# This catches typos/mangled links before they get pushed to the wrong playlist.
+warn_on_malformed_section_links = true
+
+# Display recent playlists on the dashboard menu (true/false).
+menu_show_playlists = true
+
+# Max playlists in CLI menu ("all" for all, 0 to hide).
 menu_playlist_count = "all"
 
-# Max OAuth clients in CLI menu ("all" to list all).
+# Display OAuth clients on the dashboard menu (true/false).
+menu_show_clients = true
+
+# Max OAuth clients in CLI menu ("all" for all, 0 to hide).
 menu_client_count = "all"
+
+# Display available commands list on the dashboard menu (true/false).
+menu_show_commands = true
 
 # Save log files for operations.
 enable_logging = true
@@ -26,31 +41,47 @@ pull_method = "auto"
 # Auto uses yt-dlp when possible and api as a fallback.
 link_method = "auto"
 
+# Cache OAuth tokens in data/ so you don't have to log in on every run.
+cache_oauth_tokens = true
+
 # Custom executable paths (blank = auto-detect).
 ytdlp_path = ""
 ffmpeg_path = ""
+js_runtime_path = ""
 
-# Path to a Netscape-formatted cookies.txt file for yt-dlp.
+# Path to a Netscape-format cookies.txt file for yt-dlp.
 # (Note: dropping 'cookies.txt' directly into the 'data/' folder is auto-detected).
 cookies_file = ""
 
 # Browser to extract cookies from for yt-dlp ("firefox", "edge", "chrome", "brave", etc., or blank).
 # Firefox is recommended if your browser is open; Chromium browsers lock their database while open.
-# (Both 'cookies_from_browser' and 'ytdlp_cookies_from_browser' are supported).
-cookies_from_browser = ""
-ytdlp_cookies_from_browser = ""
+cookies_from_browser = "firefox"
 
 # Custom player client for yt-dlp (e.g. "default", "mweb", "ios", "android", or blank for yt-dlp default).
 ytdlp_player_client = ""
-
-# Seconds to sleep between completed video downloads (0 disables).
-ytdlp_sleep_interval = 0
-
-# Seconds to wait before each individual HTTP sub-request (0 disables).
-# Keep at 0 to prevent excessive delays during thumbnail and format checks.
-ytdlp_sleep_requests = 0
 
 # Automatically retry tracks that previously failed to download (e.g. copyright blocked,
 # age-restricted, or deleted). Options: false (default, automatically skip them),
 # true (always retry them), "ask" (prompt each time).
 retry_failed_downloads = false
+    
+# ==============================================================================
+# AI PLAYLIST FORMATTING & ORGANIZING
+# ==============================================================================
+# Settings for 'ai-format' to reorganize sections, categorize by genre/artist, or clean titles.
+# Supports any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama) and Anthropic.
+[ai]
+# Provider: "openai", "gemini", "groq", "openrouter", "anthropic", "ollama", or "custom"
+provider = "gemini"
+
+# API key for the chosen provider (or leave blank and set OPENAI_API_KEY, GEMINI_API_KEY, etc.)
+api_key = ""
+
+# Model name (leave blank for provider default, or specify a custom model).
+model = ""
+
+# Custom API base URL (optional, e.g. "http://localhost:11434/v1" for local Ollama, or custom proxy)
+base_url = ""
+
+# Timeout in seconds for AI requests (default: 120)
+timeout = 120

@@ -1183,6 +1183,17 @@ def command_format(args, settings, playlist_data):
     ):
         print(f"[+] Successfully formatted '{file_path}' ({len(target_video_ids)} tracks normalized).")
 
+    # If the user has downloaded media files for this playlist on disk, synchronize their numbering and names
+    try:
+        from .downloader import sync_downloaded_playlist_files
+        renamed_dl = sync_downloaded_playlist_files(
+            playlist_name, target_video_ids, resolved_titles, sections_data, settings, pl_settings
+        )
+        if renamed_dl > 0:
+            print(f"[+] Synchronized numbering for {renamed_dl} local downloaded track(s) to match the playlist.")
+    except Exception as exc:
+        print(f"    [!] Note: could not sync downloaded file numbering: {exc}")
+
     still_missing = find_missing_metadata(target_video_ids, video_metadata, entry_fields)
     filled = len(missing_ids) - len(still_missing)
 

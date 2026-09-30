@@ -53,7 +53,8 @@ def show_menu(settings, playlist_data, parser=None):
 
     has_shown_section = False
 
-    if menu_limit != 0:
+    show_playlists = settings.get("menu_show_playlists", True)
+    if show_playlists and menu_limit != 0:
         print("\n  [*] Recent Playlists:")
         has_shown_section = True
         if not visible_playlists:
@@ -109,7 +110,8 @@ def show_menu(settings, playlist_data, parser=None):
     else:
         displayed_clients = clients
 
-    if client_limit != 0:
+    show_clients = settings.get("menu_show_clients", True)
+    if show_clients and client_limit != 0:
         leading_newline = "" if has_shown_section else "\n"
         print(f"{leading_newline}  [*] OAuth Clients:")
         has_shown_section = True
@@ -120,16 +122,24 @@ def show_menu(settings, playlist_data, parser=None):
         else:
             print("      No oauth clients found in 'oauth-clients/'.\n")
 
-    cmd_leading_newline = "" if has_shown_section else "\n"
-    print(f"{cmd_leading_newline}  [?] Available Commands:")
-    print("      python main.py pull <name>            Download playlist to local file")
-    print("      python main.py push <name>            Push changes and sync to YouTube")
-    print("      python main.py format <name>          Normalize track IDs and titles")
-    print("      python main.py download <name>        Download playlist as audio or video (yt-dlp)")
-    print("      python main.py list                   List all configured playlists")
-    print("      python main.py link <id_or_url>       Link a new playlist (uses YouTube title)")
-    print("      python main.py unlink <name>          Remove a playlist link")
-    print("      python main.py help                   Show full documentation and flags")
+    show_commands = settings.get("menu_show_commands", True)
+    if show_commands:
+        cmd_leading_newline = "" if has_shown_section else "\n"
+        print(f"{cmd_leading_newline}  [?] Available Commands:")
+        print("      python main.py pull <name>            Download playlist to local file")
+        print("      python main.py push <name>            Push changes and sync to YouTube")
+        print("      python main.py format <name>          Normalize track IDs and titles")
+        print("      python main.py ai-format <name>       Organize tracks into sections using AI")
+        print("      python main.py download <name>        Download playlist as audio or video (yt-dlp)")
+        print("      python main.py config [<key>] [<val>] View or change settings from terminal")
+        print("      python main.py list                   List all configured playlists")
+        print("      python main.py link <id_or_url>       Link a new playlist (uses YouTube title)")
+        print("      python main.py unlink <name>          Remove a playlist link")
+        print("      python main.py help                   Show full documentation and flags")
+        has_shown_section = True
+
+    if not has_shown_section:
+        print()
     print("=" * 70 + "\n")
 
 
@@ -188,12 +198,29 @@ Commands:
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
                 (prompts to select playlist if omitted and multiple exist).
 
+  ai-format     python main.py ai-format [<name>] [--prompt <text>] [--provider <name>] [--model <model>] [--dry-run]
+                (Alias: ai-organize)
+                Uses an AI provider (OpenAI, Gemini, Groq, OpenRouter, Anthropic, Ollama)
+                to reorganize tracks into logical sections (e.g. by genre, mood, theme, or game area).
+                Automatically provides rich context (artist/channel & duration) to the AI
+                and safely validates that no video IDs are dropped or hallucinated.
+
   download      python main.py download [<name>] [--format audio|video] [--retry-failed] [--clear-failed] [--cookies <file>] [--cookies-from-browser <browser>] [--export-urls]
                 Downloads all tracks from playlists/<name>.txt using yt-dlp.
                 Audio mode downloads best quality in native format (no ffmpeg needed).
                 Video mode downloads MP4 video (requires ffmpeg).
                 Saves to <downloads_dir>/<name>/ with incremental caching.
                 (Prompts to select playlist and audio/video format if omitted).
+
+  config        python main.py config [<key>] [<new_value>] [--playlist <name>] [--unset]
+                (Aliases: settings, set)
+                View and modify global or per-playlist settings directly from terminal.
+                Examples:
+                  python main.py config                               (list all global settings)
+                  python main.py config menu_show_commands false      (hide command list from menu)
+                  python main.py config ai.provider gemini            (set AI provider)
+                  python main.py config --playlist fors               (list settings for playlist)
+                  python main.py config download-format video -p fors (set playlist to video)
 
   help          python main.py help
                 Displays this help message with all command usages.
@@ -277,6 +304,15 @@ def dispatch_command(args, settings, playlist_data, parser=None):
             command_name="format"
         )
         command_format(args, settings, playlist_data)
+    elif args.command in ("ai-format", "ai-organize"):
+        args.target = resolve_target_playlist(
+            getattr(args, "target", None),
+            playlist_data,
+            allow_prompt=True,
+            command_name="ai-format"
+        )
+        from .ai import command_ai_format
+        command_ai_format(args, settings, playlist_data)
     elif args.command == "download":
         args.target = resolve_target_playlist(
             getattr(args, "target", None),
@@ -286,3 +322,6 @@ def dispatch_command(args, settings, playlist_data, parser=None):
         )
         fmt = getattr(args, "format", None)
         command_download(args, settings, playlist_data, fmt=fmt)
+    elif args.command in ("config", "settings", "set"):
+        from .config_cmd import command_config
+        command_config(args, settings, playlist_data)

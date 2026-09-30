@@ -2281,3 +2281,77 @@ def command_download(args, settings, playlist_data, fmt=None):
         ],
         playlist_data=playlist_data
     )
+
+
+def sync_downloaded_playlist_files(playlist_name, target_video_ids, target_video_titles, sections_data, settings, pl_settings):
+    """
+    Synchronizes the file numbering and naming of locally downloaded media files
+    with the target playlist's order and titles without needing to invoke yt-dlp or re-download anything.
+    If the playlist's download directory does not exist or has no media files, this is a no-op.
+    Returns the total number of files renamed.
+    """
+    safe_name = sanitize_filename(playlist_name)
+    custom_dl_path = (pl_settings.get("download_path") or "").strip()
+    if custom_dl_path:
+        playlist_download_dir = os.path.abspath(custom_dl_path)
+    else:
+        downloads_root = settings.get("downloads_dir", DOWNLOADS_DIR)
+        playlist_download_dir = os.path.join(downloads_root, safe_name)
+
+    if not os.path.isdir(playlist_download_dir):
+        return 0
+
+    number_files = pl_settings.get("number_files", True)
+    download_mode = pl_settings.get("download_mode", "main_only")
+    number_sections = pl_settings.get("number_section_folders", False)
+
+    sections = sections_data.get("sections", []) if isinstance(sections_data, dict) else (sections_data or [])
+    is_sectioned = bool(sections_data.get("is_sectioned") if isinstance(sections_data, dict) else any(not s.get("is_implicit") for s in sections))
+    full_playlist_name = _resolve_full_playlist_folder_name(playlist_name, sections_data if isinstance(sections_data, dict) else {}, pl_settings)
+
+    folders_to_sync = []  # list of (folder_dir, video_ids)
+
+    if is_sectioned and download_mode in ("all", "sections_only"):
+        explicit_sections = [s for s in sections if not s.get("is_implicit")]
+        sec_pad_width = max(2, len(str(len(explicit_sections))))
+        if download_mode == "all":
+            full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
+            if os.path.isdir(full_playlist_dir):
+                folders_to_sync.append((full_playlist_dir, target_video_ids))
+            elif _folder_has_media(playlist_download_dir):
+                folders_to_sync.append((playlist_download_dir, target_video_ids))
+
+        for sec_idx, sec in enumerate(explicit_sections, 1):
+            raw_sec_name = sec.get("title") or sec.get("playlist_id") or "Section"
+            if number_sections:
+                sec_name = sanitize_filename(f"{sec_idx:0{sec_pad_width}d} - {raw_sec_name}")
+            else:
+                sec_name = sanitize_filename(raw_sec_name)
+            sec_dir = os.path.join(playlist_download_dir, sec_name)
+            sec_vids = sec.get("video_ids", [])
+            if os.path.isdir(sec_dir) and sec_vids:
+                folders_to_sync.append((sec_dir, sec_vids))
+    else:
+        full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
+        if os.path.isdir(full_playlist_dir):
+            folders_to_sync.append((full_playlist_dir, target_video_ids))
+        elif os.path.isdir(playlist_download_dir) and _folder_has_media(playlist_download_dir):
+            folders_to_sync.append((playlist_download_dir, target_video_ids))
+
+    total_renamed = 0
+    for folder_dir, vids in folders_to_sync:
+        manifest_data = load_playlist_manifest(folder_dir)
+        manifest_tracks = manifest_data.get("tracks", {})
+        manifest_failed = manifest_data.get("failed", {})
+
+        ren, skipped, ren_err, updated_manifest = _safe_sync_file_numbering(
+            folder_dir, vids, target_video_titles, number_files, manifest_tracks
+        )
+        if updated_manifest:
+            manifest_tracks.update(updated_manifest)
+            save_playlist_manifest(folder_dir, {"tracks": manifest_tracks, "failed": manifest_failed})
+        if ren > 0:
+            print(f"[*] Synchronized numbering for {ren} downloaded file(s) in '{os.path.basename(folder_dir)}'.")
+            total_renamed += ren
+
+    return total_renamed

@@ -16,14 +16,41 @@ except ImportError:
     except ImportError:
         import tomllib
 
-VERSION = "1.2.4"
+VERSION = "1.3.0"
 
-SETTINGS_FILE = "settings.toml"
+DEV_SETTINGS_FILE = "DEV-settings.toml"
+PROD_SETTINGS_FILE = "settings.toml"
+DEV_PLAYLIST_SETTINGS_FILE = "DEV-playlist-settings.toml"
+PROD_PLAYLIST_SETTINGS_FILE = "playlist-settings.toml"
+
+def get_settings_file():
+    """Returns DEV-settings.toml if it exists on disk, otherwise settings.toml."""
+    return DEV_SETTINGS_FILE if os.path.exists(DEV_SETTINGS_FILE) else PROD_SETTINGS_FILE
+
+def get_playlist_settings_file():
+    """Returns DEV-playlist-settings.toml if it exists on disk, otherwise playlist-settings.toml."""
+    return DEV_PLAYLIST_SETTINGS_FILE if os.path.exists(DEV_PLAYLIST_SETTINGS_FILE) else PROD_PLAYLIST_SETTINGS_FILE
+
+# For backward compatibility with modules importing SETTINGS_FILE / PLAYLIST_SETTINGS_FILE
+class _LazyConfigFile(str):
+    def __new__(cls, resolver):
+        instance = super().__new__(cls, resolver())
+        instance._resolver = resolver
+        return instance
+    def __str__(self):
+        return self._resolver()
+    def __repr__(self):
+        return repr(self._resolver())
+    def __fspath__(self):
+        return self._resolver()
+
+SETTINGS_FILE = _LazyConfigFile(get_settings_file)
+PLAYLIST_SETTINGS_FILE = _LazyConfigFile(get_playlist_settings_file)
+
 DATA_DIR = "data"
 TOKENS_DIR = os.path.join(DATA_DIR, "tokens")
 PLAYLISTS_DIR = "playlists"
 PLAYLISTS_DATA_FILE = os.path.join(DATA_DIR, "playlist-data.json")
-PLAYLIST_SETTINGS_FILE = "playlist-settings.toml"
 
 OAUTH_CLIENTS_DIR = "oauth-clients"
 LOGS_DIR = "logs"
@@ -105,9 +132,7 @@ DEFAULT_PLAYLIST_SETTINGS = {
     "oauth_client": "",  # Default oauth-client (from oauth-clients/) to use for this playlist (blank = ask/auto)
     "account": "",  # Google account email to always use for this playlist (blank = pick from cached accounts / log in each time). Overridden by --account.
     "include_playlist_name_in_sections": False,  # 'format' will also write the linked section playlist's real title
-    "cookies_file": "",  # Path to Netscape cookies.txt file for this playlist
-    "cookies_from_browser": "",  # Browser to extract cookies from for this playlist
-    "ytdlp_player_client": "",  # Custom player client for yt-dlp (e.g. "default", "mweb", "ios")
+    "ai_prompt": "",  # Custom prompt to auto-select for 'ai-format' without prompting
 }
 
 SETTINGS_INFO_KEY = "HOW_TO_EDIT_SETTINGS"
@@ -116,6 +141,9 @@ SETTINGS_INFO_KEY = "HOW_TO_EDIT_SETTINGS"
 def _format_toml_settings(settings):
     """Generates clean, human-readable TOML with descriptive comments for all settings."""
     safety = "true" if settings.get("safety_check_before_push", True) else "false"
+    menu_show_p = "true" if settings.get("menu_show_playlists", True) else "false"
+    menu_show_c = "true" if settings.get("menu_show_clients", True) else "false"
+    menu_show_cmd = "true" if settings.get("menu_show_commands", True) else "false"
     menu_p = settings.get("menu_playlist_count", 3)
     menu_p_str = f'"{menu_p}"' if isinstance(menu_p, str) else str(menu_p)
     menu_c = settings.get("menu_client_count", 3)
@@ -133,13 +161,18 @@ def _format_toml_settings(settings):
     player_client = settings.get("ytdlp_player_client", "")
     cache_tokens = "true" if settings.get("cache_oauth_tokens", True) else "false"
     warn_links = "true" if settings.get("warn_on_malformed_section_links", True) else "false"
-    sleep_int = settings.get("ytdlp_sleep_interval", 0)
-    sleep_req = settings.get("ytdlp_sleep_requests", 0)
     retry_failed = settings.get("retry_failed_downloads", False)
     if isinstance(retry_failed, bool):
         retry_failed_str = "true" if retry_failed else "false"
     else:
         retry_failed_str = f'"{retry_failed}"'
+
+    ai_cfg = settings.get("ai", {}) if isinstance(settings.get("ai"), dict) else {}
+    ai_provider = ai_cfg.get("provider", "openai")
+    ai_api_key = ai_cfg.get("api_key", "")
+    ai_model = ai_cfg.get("model", "")
+    ai_base_url = ai_cfg.get("base_url", "")
+    ai_timeout = ai_cfg.get("timeout", 120)
 
     return f"""# ypm Global Settings
 
@@ -152,11 +185,20 @@ safety_check_before_push = {safety}
 # This catches typos/mangled links before they get pushed to the wrong playlist.
 warn_on_malformed_section_links = {warn_links}
 
-# Max playlists in CLI menu ("all" for all).
+# Display recent playlists on the dashboard menu (true/false).
+menu_show_playlists = {menu_show_p}
+
+# Max playlists in CLI menu ("all" for all, 0 to hide).
 menu_playlist_count = {menu_p_str}
 
-# Max OAuth clients in CLI menu ("all" for all).
+# Display OAuth clients on the dashboard menu (true/false).
+menu_show_clients = {menu_show_c}
+
+# Max OAuth clients in CLI menu ("all" for all, 0 to hide).
 menu_client_count = {menu_c_str}
+
+# Display available commands list on the dashboard menu (true/false).
+menu_show_commands = {menu_show_cmd}
 
 # Save log files for operations.
 enable_logging = {logging}
@@ -189,22 +231,37 @@ cookies_file = "{cookies_file}"
 
 # Browser to extract cookies from for yt-dlp ("firefox", "edge", "chrome", "brave", etc., or blank).
 # Firefox is recommended if your browser is open; Chromium browsers lock their database while open.
+cookies_from_browser = "{cookies_browser}"
 ytdlp_cookies_from_browser = "{cookies_browser}"
 
 # Custom player client for yt-dlp (e.g. "default", "mweb", "ios", "android", or blank for yt-dlp default).
 ytdlp_player_client = "{player_client}"
 
-# Seconds to sleep between completed video downloads (0 disables).
-ytdlp_sleep_interval = {sleep_int}
-
-# Seconds to wait before each individual HTTP sub-request (0 disables).
-# Keep at 0 to prevent excessive delays during thumbnail and format checks.
-ytdlp_sleep_requests = {sleep_req}
-
 # Automatically retry tracks that previously failed to download (e.g. copyright blocked,
 # age-restricted, or deleted). Options: false (default, automatically skip them),
 # true (always retry them), "ask" (prompt each time).
 retry_failed_downloads = {retry_failed_str}
+    
+# ==============================================================================
+# AI PLAYLIST FORMATTING & ORGANIZING
+# ==============================================================================
+# Settings for 'ai-format' to reorganize sections, categorize by genre/artist, or clean titles.
+# Supports any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama) and Anthropic.
+[ai]
+# Provider: "openai", "gemini", "groq", "openrouter", "anthropic", "ollama", or "custom"
+provider = "{ai_provider}"
+
+# API key for the chosen provider (or leave blank and set OPENAI_API_KEY, GEMINI_API_KEY, etc.)
+api_key = "{ai_api_key}"
+
+# Model name (leave blank for provider default, or specify a custom model).
+model = "{ai_model}"
+
+# Custom API base URL (optional, e.g. "http://localhost:11434/v1" for local Ollama, or custom proxy)
+base_url = "{ai_base_url}"
+
+# Timeout in seconds for AI requests (default: 120)
+timeout = {ai_timeout}
 """
 
 
@@ -213,8 +270,11 @@ def load_settings():
     default_settings = {
         "safety_check_before_push": True,
         "warn_on_malformed_section_links": True,
+        "menu_show_playlists": True,
         "menu_playlist_count": 3,
+        "menu_show_clients": True,
         "menu_client_count": 3,
+        "menu_show_commands": True,
         "enable_logging": True,
         "downloads_dir": "playlist-downloads",
         "clickable_links_in_playlist_files": False,
@@ -231,6 +291,13 @@ def load_settings():
         "ytdlp_sleep_interval": 0,
         "ytdlp_sleep_requests": 0,
         "retry_failed_downloads": False,
+        "ai": {
+            "provider": "openai",
+            "api_key": "",
+            "model": "",
+            "base_url": "",
+            "timeout": 120,
+        },
     }
     if not os.path.exists(SETTINGS_FILE):
         print(f"[*] Settings file not found. Creating default '{SETTINGS_FILE}'...")
@@ -244,8 +311,11 @@ def load_settings():
                 raise ValueError("Settings file must contain a TOML table.")
             settings.setdefault("safety_check_before_push", True)
             settings.setdefault("warn_on_malformed_section_links", True)
+            settings.setdefault("menu_show_playlists", True)
             settings.setdefault("menu_playlist_count", 3)
+            settings.setdefault("menu_show_clients", True)
             settings.setdefault("menu_client_count", 3)
+            settings.setdefault("menu_show_commands", True)
             settings.setdefault("enable_logging", True)
             settings.setdefault("downloads_dir", "playlist-downloads")
             settings.setdefault("clickable_links_in_playlist_files", False)
@@ -262,6 +332,15 @@ def load_settings():
             settings.setdefault("ytdlp_player_client", "")
             settings.setdefault("ytdlp_sleep_interval", 0)
             settings.setdefault("ytdlp_sleep_requests", 0)
+            ai_cfg = settings.setdefault("ai", {})
+            if not isinstance(ai_cfg, dict):
+                ai_cfg = {}
+                settings["ai"] = ai_cfg
+            ai_cfg.setdefault("provider", "openai")
+            ai_cfg.setdefault("api_key", "")
+            ai_cfg.setdefault("model", "")
+            ai_cfg.setdefault("base_url", "")
+            ai_cfg.setdefault("timeout", 120)
             return settings
     except (tomllib.TOMLDecodeError, ValueError, OSError) as e:
         backup_file = f"{SETTINGS_FILE}.corrupted.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
@@ -418,6 +497,9 @@ def _format_playlist_settings_toml(all_settings):
         '# When `format` fills in a section header, also include the linked section playlist\'s',
         '# real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"',
         '# include_playlist_name_in_sections = false',
+        '#',
+        '# Custom instructions to automatically use for \'ai-format\' without prompting',
+        '# ai_prompt = "Group into sections by genre: Hip Hop, R&B, Rock, Ambient"',
         '',
         ''
     ]
@@ -451,6 +533,7 @@ def _format_playlist_settings_toml(all_settings):
         ck_file = entry.get("cookies_file", "") or ""
         ck_browser = entry.get("cookies_from_browser", "") or ""
         yt_client = entry.get("ytdlp_player_client", "") or ""
+        ai_pr = entry.get("ai_prompt", "") or ""
 
         lines.append(f'download-format = "{fmt}"')
         lines.append(f'embed_thumbnail = {thumb}')
@@ -468,16 +551,22 @@ def _format_playlist_settings_toml(all_settings):
         lines.append(f'oauth_client = "{oauth_c}"')
         lines.append(f'account = "{account_v}"')
         lines.append(f'include_playlist_name_in_sections = {inc_pl_name}')
-        lines.append(f'cookies_file = "{ck_file}"')
-        lines.append(f'cookies_from_browser = "{ck_browser}"')
-        lines.append(f'ytdlp_player_client = "{yt_client}"')
+        if ai_pr:
+            escaped_ai_pr = ai_pr.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'ai_prompt = "{escaped_ai_pr}"')
+        if ck_file:
+            lines.append(f'cookies_file = "{ck_file}"')
+        if ck_browser:
+            lines.append(f'cookies_from_browser = "{ck_browser}"')
+        if yt_client:
+            lines.append(f'ytdlp_player_client = "{yt_client}"')
 
         # Any extra custom keys
         known_written_keys = (
             "format", "download-format", "embed_thumbnail", "number_files", "push_mode",
             "download_mode", "playlist_entry_format", "download_path", "folder_name_source",
             "atomic_writes", "number_section_folders", "oauth_client", "account",
-            "include_playlist_name_in_sections", "cookies_file", "cookies_from_browser",
+            "include_playlist_name_in_sections", "ai_prompt", "cookies_file", "cookies_from_browser",
             "ytdlp_player_client",
         )
         for k, v in entry.items():
@@ -583,9 +672,11 @@ def load_playlist_settings(playlist_name):
         if not isinstance(entry.get(key), str):
             entry[key] = str(entry.get(key) or "")
 
+    entry.setdefault("cookies_file", "")
     pl_browser = (entry.get("cookies_from_browser") or entry.get("ytdlp_cookies_from_browser") or "").strip()
     entry["cookies_from_browser"] = pl_browser
     entry["ytdlp_cookies_from_browser"] = pl_browser
+    entry.setdefault("ytdlp_player_client", "")
 
     # Repair the entry format if needed
     raw_fmt = entry.get("playlist_entry_format")

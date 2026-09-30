@@ -18,9 +18,11 @@ Some example use cases are:
 - [COMMANDS](#commands)
 - [TYPICAL WORKFLOW](#typical-workflow)
   - [Managing a playlist](#managing-a-playlist)
+  - [Organizing and Formatting with AI](#organizing-and-formatting-with-ai)
   - [Downloading a playlist](#downloading-a-playlist)
   - [Bypassing YouTube Bot Detection & Cookies](#bypassing-youtube-bot-detection--cookies)
 - [CONFIGURATION](#configuration)
+  - [Managing Settings (`config` command)](#managing-settings-config-command)
   - [Global settings - `settings.toml`](#global-settings--settingstoml)
   - [Playlist settings - `playlist-settings.toml`](#playlist-settings--playlist-settingstoml)
     - [All keys](#all-keys)
@@ -70,11 +72,14 @@ youtube-playlist-manager/
 ├── playlist-settings.toml   # per-playlist preferences & sync modes
 ├── core/                    # application modules
 │   ├── config.py            # settings & data persistence
+│   ├── config_cmd.py        # CLI interactive settings editor
 │   ├── auth.py              # OAuth login & client selection
 │   ├── parser.py            # URL/ID parsing & playlist file I/O
 │   ├── sync.py              # LIS minimal-moves reorder engine
-│   ├── commands.py          # command handlers (pull, push, etc.)
-│   └── ui.py                # interactive menu & terminal formatting
+│   ├── commands.py          # command handlers (pull, push, format, etc.)
+│   ├── downloader.py        # yt-dlp downloading & metadata extraction
+│   ├── ai.py                # AI reorganization & title cleanup engine
+│   └── ui.py                # interactive menu, help & terminal formatting
 ├── oauth-clients/           # OAuth client secrets (do not share)
 │   └── project-a.json       # example OAuth client file
 ├── data/                    # saved data
@@ -83,7 +88,8 @@ youtube-playlist-manager/
 │   └── tokens/              # cached OAuth tokens (one per account)
 │       └── project-a_user@gmail.com.token.json
 ├── playlists/               # playlist files
-│   └── my-playlist.txt      # playlist file (one per playlist)
+│   ├── my-playlist.txt      # playlist file (one per playlist)
+│   └── archive/             # automatic timestamped backups before AI edits
 ├── playlist-downloads/      # downloaded audio & video
 │   └── my-playlist/         # one folder per playlist
 │       ├── _manifest.json   # download cache & track file mapping
@@ -98,15 +104,17 @@ youtube-playlist-manager/
 
 | Command | Syntax | What it does |
 | --- | --- | --- |
-| `menu` | `python main.py` | Opens the interactive menu with recent playlists and a quick command reference. |
+| `menu` | `python main.py` | Opens the interactive menu with recent playlists, OAuth clients, and command reference. |
 | `link` | `python main.py link <id_or_url>` | Registers a playlist by URL or ID and creates its playlist file and download folder. |
 | `unlink` | `python main.py unlink <name>` | Removes a linked playlist. |
 | `list` | `python main.py list` | Lists linked playlists with their last command and timestamp. |
 | `pull` | `python main.py pull [<name>]` | Fetches the live track order into `playlists/<name>.txt`. |
 | `push` | `python main.py push [<name>]` | Syncs local edits (reorders, additions, deletions) back to YouTube *(needs Google Cloud)*. |
-| `format` | `python main.py format [<name>]` | Normalizes raw URLs/IDs in the playlist file to `<video_id> \| <title>`. |
-| `download` | `python main.py download [<name>] [--format audio\|video]` | Downloads the playlist as audio or video via `yt-dlp`. |
-| `help` | `python main.py help` | Shows all commands and usage. |
+| `format` | `python main.py format [<name>]` | Normalizes raw URLs/IDs in the playlist file and syncs local downloaded track numbering. |
+| `ai-format` | `python main.py ai-format [<name>] [-p <prompt>]` | Reorganizes tracks and creates logical sections (genre, mood, artist) with AI *(alias: `ai-organize`)*. |
+| `download` | `python main.py download [<name>] [--format audio\|video]` | Downloads the playlist as audio or video via `yt-dlp` with incremental caching. |
+| `config` | `python main.py config [<key>] [<val>] [-p <playlist>]` | View or modify global and playlist settings directly from the terminal *(aliases: `settings`, `set`)*. |
+| `help` | `python main.py help` | Shows all commands, options, and usage. |
 
 Anywhere `[<name>]` appears, it's optional - ypm auto-selects if you only have one playlist linked, and prompts you otherwise.
 
@@ -131,6 +139,25 @@ python main.py pull
 # Push your edits to YouTube (needs Google Cloud)
 python main.py push
 ```
+
+### Organizing into Sections with AI
+
+Organize playlist tracks into genre/mood sections, group by game/area/theme, or re-sequence using your preferred AI model:
+
+```bash
+# Organize interactively (prompts for what you want the AI to do)
+python main.py ai-format <name>
+
+# Organize with explicit prompt instructions
+python main.py ai-format <name> -p "Group into sections by genre: Hip Hop, R&B, Rock, Ambient"
+
+# Preview proposed AI changes safely without saving to disk
+python main.py ai-format <name> --dry-run
+```
+
+- **Open to Any AI**: Works with OpenAI, Google Gemini, Groq, OpenRouter, Anthropic Claude, or 100% free local models with Ollama.
+- **Context-Aware**: `ypm` enriches tracks with full artist/channel and duration metadata via yt-dlp before sending to the AI so it has complete context to categorize accurately.
+- **Zero Data Loss Guarantee**: Validates that all video IDs are preserved 1:1, filters out any hallucinations, and saves an automatic timestamped backup in `playlists/archive/` before updating the file.
 
 ### Downloading a playlist
 
@@ -158,21 +185,41 @@ Chromium-based browsers (Google Chrome, Microsoft Edge, Brave) lock their cookie
 4. Drop the exported text file into `data/cookies.txt` (or `data/youtube_cookies.txt`).
 5. `ypm` will automatically detect and use `data/cookies.txt` on every download run-no extra commands or flags needed!
 
-#### Method 2: Use Firefox (`ytdlp_cookies_from_browser = "firefox"`)
+#### Method 2: Use Firefox (`cookies_from_browser = "firefox"`)
 Unlike Chromium browsers, **Firefox does not lock its cookie database while running on Windows**. If you have Firefox installed and have signed into YouTube:
 1. In `settings.toml`, set:
    ```toml
-   ytdlp_cookies_from_browser = "firefox"
+   cookies_from_browser = "firefox"
    ```
-   (Or pass the flag: `python main.py download --cookies-from-browser firefox`)
+   (Or run: `python main.py config cookies_from_browser firefox` / pass flag `--cookies-from-browser firefox`)
 2. yt-dlp will read your YouTube session cookies directly from Firefox in real time even while Firefox is actively open and running.
 
 #### Method 3: Using Edge / Chrome directly
-You can set `ytdlp_cookies_from_browser = "edge"` or `"chrome"`, but on Windows you **must completely close your browser** before running `download` so Windows releases the file lock.
+You can set `cookies_from_browser = "edge"` or `"chrome"`, but on Windows you **must completely close your browser** before running `download` so Windows releases the file lock.
 
 ---
 
 ## CONFIGURATION
+
+### Managing Settings (`config` command)
+
+You can view or change any setting directly from the command line without opening a text editor:
+
+```bash
+# List all global settings and their current values
+python main.py config
+
+# View a specific setting
+python main.py config cookies_from_browser
+
+# Change a global setting
+python main.py config cookies_from_browser firefox
+python main.py config menu_show_commands false   # Hide commands list from menu for a minimal dashboard
+
+# View or change playlist-specific settings (-p / --playlist)
+python main.py config -p "Forsaken OST (Roblox)"
+python main.py config download-format video -p fors
+```
 
 ### Global settings - `settings.toml`
 
@@ -181,8 +228,11 @@ These settings apply across all playlists.
 | Key | Default | Description |
 | --- | --- | --- |
 | `safety_check_before_push` | `true` | Prompt to confirm you've pulled before pushing. |
-| `menu_playlist_count` | `"all"` | Maximum number of playlists shown in the interactive menu (`"all"` or a number). |
-| `menu_client_count` | `"all"` | Maximum number of OAuth clients shown in the interactive menu (`"all"` or a number). |
+| `menu_show_playlists` | `true` | Show recent playlists on the dashboard menu. |
+| `menu_playlist_count` | `"all"` | Maximum number of playlists shown in the interactive menu (`"all"` or a number, `0` to hide). |
+| `menu_show_clients` | `true` | Show OAuth clients on the dashboard menu. |
+| `menu_client_count` | `"all"` | Maximum number of OAuth clients shown in the interactive menu (`"all"` or a number, `0` to hide). |
+| `menu_show_commands` | `true` | Show available commands help list on the dashboard (`false` for minimal menu). |
 | `enable_logging` | `true` | Save log files for all operations to `logs/`. |
 | `downloads_dir` | `"playlist-downloads"` | Root folder for all downloads. |
 | `clickable_links_in_playlist_files` | `true` | Save track entries as full URLs instead of raw IDs. Run `format` to apply to existing playlist files. |
@@ -191,9 +241,9 @@ These settings apply across all playlists.
 | `ytdlp_path` | `""` | Custom path to the `yt-dlp` executable. Leave blank to auto-detect. |
 | `ffmpeg_path` | `""` | Custom path to the `ffmpeg` executable. Leave blank to auto-detect. |
 | `cookies_file` | `""` | Custom path to Netscape-format cookies.txt. Leave blank to auto-detect `data/cookies.txt`. |
-| `ytdlp_cookies_from_browser` | `""` | Browser to extract cookies from (e.g. `"firefox"`). |
-| `ytdlp_sleep_interval` | `0` | Delay in seconds between completed tracks to avoid rate limits. |
+| `cookies_from_browser` | `"firefox"` | Browser to extract cookies from (e.g. `"firefox"`, `"edge"`, `"chrome"`). |
 | `retry_failed_downloads` | `false` | What to do with tracks that previously failed: `false` = skip silently, `true` = always retry, `"ask"` = prompt each time. |
+| `[ai]` | table | AI configuration for `ai-format` (`provider`, `api_key`, `model`, `base_url`, `timeout`). |
 
 ### Playlist settings - `playlist-settings.toml`
 
@@ -233,6 +283,7 @@ include_playlist_name_in_sections = false
 | `account` | `"user@gmail.com"` \| `""` | Google account email to authenticate as. Keys the cached token in `data/tokens/` so multiple accounts can each have their own token without overwriting each other. Leave blank to pick an account in the browser each time. |
 | `cookies_file` | path string | Custom cookie file path for this playlist. |
 | `cookies_from_browser` | browser string | Custom browser for this playlist (e.g. `"firefox"`). |
+| `ai_prompt` | prompt string | Custom instructions to automatically use for `ai-format` on this playlist without prompting. |
 | `include_playlist_name_in_sections` | `true` \| `false` | When `format` fills in a section header, also append the section playlist's real YouTube title: `## <url> \| <your name> \| <real title>`. |
 
 #### `download_mode` explained
@@ -241,7 +292,7 @@ include_playlist_name_in_sections = false
 | --- | --- |
 | `"all"` | Downloads both the main folder and each section sub-folder. Tracks exist in both places. |
 | `"main_only"` | Downloads everything into a single flat folder. Good for playlists without sections. |
-| `"sections_only"` | Only downloads section sub-folders (defined by `###` headers in the playlist file). The top-level folder is skipped. |
+| `"sections_only"` | Only downloads section sub-folders (defined by `##` section headers in the playlist file). The top-level folder is skipped. |
 
 #### Using `oauth_client` and `account`
 

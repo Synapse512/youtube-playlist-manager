@@ -24,8 +24,11 @@ __pycache__/
 *.bak
 *.tmp
 
-# Playlist settings
+# Playlist settings & dev overrides
 playlist-settings.toml
+DEV-*.toml
+DEV-settings.toml
+DEV-playlist-settings.toml
 
 # Playlist downloads
 playlist-downloads/*
