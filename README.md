@@ -5,7 +5,7 @@
 ### Why use ypm?
 YouTube's web interface makes managing large playlists painful - reordering hundreds of tracks requires endless scrolling and dragging, bulk-editing doesn't exist, and organizing by genre, artist, mood, etc. takes hours of manual work.
 
-**ypm solves this by letting you edit playlists through text files** You can simply use the `link` command + a YT playlist id to pull every video from a playlist into a text file, and from there let `ypm` sync any changes made to it bidirectionally between your local file downloads and YouTube. 
+**ypm solves this by letting you edit playlists through text files:** You can simply use the `link` command + a YouTube playlist ID to pull every video from it into a text file, and from there let `ypm` sync any changes made to it bidirectionally between your local file downloads and YouTube. 
 
 Some examples of using ypm include:
 - running the `ai-format` command to organize your **big playlist** into **smaller playlists/sections**
