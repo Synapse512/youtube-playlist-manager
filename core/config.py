@@ -16,7 +16,7 @@ except ImportError:
     except ImportError:
         import tomllib
 
-VERSION = "1.3.0"
+VERSION = "1.2.4"
 
 DEV_SETTINGS_FILE = "DEV-settings.toml"
 PROD_SETTINGS_FILE = "settings.toml"

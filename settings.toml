@@ -55,7 +55,7 @@ cookies_file = ""
 
 # Browser to extract cookies from for yt-dlp ("firefox", "edge", "chrome", "brave", etc., or blank).
 # Firefox is recommended if your browser is open; Chromium browsers lock their database while open.
-cookies_from_browser = "firefox"
+cookies_from_browser = ""
 
 # Custom player client for yt-dlp (e.g. "default", "mweb", "ios", "android", or blank for yt-dlp default).
 ytdlp_player_client = ""

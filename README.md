@@ -1,13 +1,18 @@
 # YouTube Playlist Manager `(ypm)`
 
-**CLI tool for advanced management of local and online Youtube playlists**
+**CLI tool for advanced management of local and online YouTube playlists**
 
 ### Why use ypm?
-You can use ypm to perform advanced management operations on both online and local playlists derived from Youtube 
-Some example use cases are:
-- Having your playlists be automatically formatted into genres by using one command
-- Inserting or deleting lines from a text file to push changes to an online playlist
-- Easily downloading playlists and managing them with custom settings
+YouTube's web interface makes managing large playlists painful - reordering hundreds of tracks requires endless scrolling and dragging, bulk-editing doesn't exist, and organizing by genre, artist, mood, etc. takes hours of manual work.
+
+**ypm solves this by letting you edit playlists through text files** You can simply use the `link` command + a YT playlist id to pull every video from a playlist into a text file, and from there let `ypm` sync any changes made to it bidirectionally between your local file downloads and YouTube. 
+
+Some examples of using ypm include:
+- running the `ai-format` command to organize your **big playlist** into **smaller playlists/sections**
+- using the `push` command to **update your online playlists** with a new order without manual dragging
+- running the `download` command to automatically **download the latest changes** on an online YT playlist
+- using the auto-generated text files as backups to **easily reconstruct entire YouTube playlists** online and/or locally
+- easily **customizing `ypm` and playlist management** through settings, with things like download layouts, formats, storage locations, etc.
 
 ---
 
