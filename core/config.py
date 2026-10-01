@@ -124,9 +124,13 @@ DEFAULT_PLAYLIST_SETTINGS = {
     "number_files": True,
     "push_mode": "all",  # "all", "main_only", "sections_only"
     "download_mode": "main_only",  # "main_only", "all", "sections_only"
+    "pull_mode": "main_only",  # "main_only", "all", "sections_only"
+    "generate_m3u8": True,  # Generate/update UTF-8 .m3u8 playlist files for folders and sections
+    "m3u8_mode": "all",  # Which .m3u8 files to generate: "all" (main + sections, default), "main_only", "sections_only"
+    "allow_duplicates": True,  # Allow duplicate video IDs in playlist (if false, 'format' purges duplicates)
     "playlist_entry_format": DEFAULT_PLAYLIST_ENTRY_FORMAT,
     "download_path": "",  # Custom download path (blank = default downloads_dir/<playlist>)
-    "folder_name_source": "alias",  # Names the "all"-mode full-playlist download folder (was hardcoded "FULL_PLAYLIST"): "alias" = playlist's own name; "header" = the title from the "### " header
+    "folder_name_source": "alias",  # Base name for the full playlist download folder (appends " (Full)"): "alias" = playlist's own name; "header" = the title from the "### " header
     "atomic_writes": True,  # Set to false for direct writes to playlist.txt
     "number_section_folders": False,  # Order section download folders by their position in playlist.txt
     "oauth_client": "",  # Default oauth-client (from oauth-clients/) to use for this playlist (blank = ask/auto)
@@ -452,7 +456,7 @@ def _format_playlist_settings_toml(all_settings):
         '# Which playlists to sync to YouTube on \'push\': "all", "main_only", or "sections_only"',
         '# push_mode = "all"',
         '#',
-        '# Download layout: "main_only" (flat folder), "all", or "sections_only"',
+        '# Download layout: "main_only" (full playlist in its own subfolder), "all", or "sections_only"',
         '# download_mode = "main_only"',
         '#',
         '# How each video line is written in the playlist .txt file (run `pull` after changing it).',
@@ -464,9 +468,8 @@ def _format_playlist_settings_toml(all_settings):
         '# Custom folder for this playlist\'s downloads (blank = <downloads_dir>/<playlist name>)',
         '# download_path = "D:/Music/MyPlaylist"',
         '#',
-        '# Which name to use for the "everything" download folder in download_mode = "all"',
-        '# (previously always called "FULL_PLAYLIST"). "alias" = use the playlist\'s own',
-        '# name/alias (default). "header" = use the title from the "### " header in the .txt file.',
+        '# Base name for the full-playlist download folder (appends " (Full)").',
+        '# "alias" = use the playlist\'s own name/alias (default). "header" = use the title from the "### " header in the .txt file.',
         '# folder_name_source = "alias"',
         '#',
         '# Write playlists/<name>.txt atomically (safe, default) or directly in-place ("direct write").',
@@ -498,6 +501,18 @@ def _format_playlist_settings_toml(all_settings):
         '# real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"',
         '# include_playlist_name_in_sections = false',
         '#',
+        '# Which playlists to pull from YouTube on \'pull\': "main_only" (default), "all", or "sections_only"',
+        '# pull_mode = "main_only"',
+        '#',
+        '# Generate and update UTF-8 .m3u8 playlist files for folders and sections whenever downloads or sync run',
+        '# generate_m3u8 = true',
+        '#',
+        '# Which .m3u8 playlist files to generate: "all" (main + section .m3u8s, default), "main_only", or "sections_only"',
+        '# m3u8_mode = "all"',
+        '#',
+        '# Allow duplicate tracks in the playlist file (if false, running `format` removes duplicate tracks)',
+        '# allow_duplicates = true',
+        '#',
         '# Custom instructions to automatically use for \'ai-format\' without prompting',
         '# ai_prompt = "Group into sections by genre: Hip Hop, R&B, Rock, Ambient"',
         '',
@@ -520,6 +535,10 @@ def _format_playlist_settings_toml(all_settings):
         num = "true" if entry.get("number_files", DEFAULT_PLAYLIST_SETTINGS["number_files"]) else "false"
         push_m = entry.get("push_mode", DEFAULT_PLAYLIST_SETTINGS["push_mode"])
         dl_m = entry.get("download_mode", DEFAULT_PLAYLIST_SETTINGS["download_mode"])
+        pull_m = entry.get("pull_mode", DEFAULT_PLAYLIST_SETTINGS["pull_mode"])
+        m3u8_gen = "true" if entry.get("generate_m3u8", DEFAULT_PLAYLIST_SETTINGS["generate_m3u8"]) else "false"
+        m3u8_m = entry.get("m3u8_mode", DEFAULT_PLAYLIST_SETTINGS["m3u8_mode"])
+        allow_dups = "true" if entry.get("allow_duplicates", DEFAULT_PLAYLIST_SETTINGS["allow_duplicates"]) else "false"
         entry_fmt = normalize_playlist_entry_format(
             entry.get("playlist_entry_format", DEFAULT_PLAYLIST_SETTINGS["playlist_entry_format"])
         )
@@ -540,6 +559,10 @@ def _format_playlist_settings_toml(all_settings):
         lines.append(f'number_files = {num}')
         lines.append(f'push_mode = "{push_m}"')
         lines.append(f'download_mode = "{dl_m}"')
+        lines.append(f'pull_mode = "{pull_m}"')
+        lines.append(f'generate_m3u8 = {m3u8_gen}')
+        lines.append(f'm3u8_mode = "{m3u8_m}"')
+        lines.append(f'allow_duplicates = {allow_dups}')
         lines.append(f'playlist_entry_format = "{entry_fmt}"')
         # These are always written (even at their default) so they're visible and
         # editable in the file - previously they were hidden unless already
@@ -564,7 +587,8 @@ def _format_playlist_settings_toml(all_settings):
         # Any extra custom keys
         known_written_keys = (
             "format", "download-format", "embed_thumbnail", "number_files", "push_mode",
-            "download_mode", "playlist_entry_format", "download_path", "folder_name_source",
+            "download_mode", "pull_mode", "generate_m3u8", "m3u8_mode", "allow_duplicates",
+            "playlist_entry_format", "download_path", "folder_name_source",
             "atomic_writes", "number_section_folders", "oauth_client", "account",
             "include_playlist_name_in_sections", "ai_prompt", "cookies_file", "cookies_from_browser",
             "ytdlp_player_client",
@@ -644,7 +668,7 @@ def load_playlist_settings(playlist_name):
 
     # Normalize types in case the user edited the TOML with strings for booleans
     for key in ("embed_thumbnail", "number_files", "atomic_writes", "number_section_folders",
-                "include_playlist_name_in_sections"):
+                "include_playlist_name_in_sections", "generate_m3u8", "allow_duplicates"):
         if isinstance(entry.get(key), str):
             entry[key] = entry[key].strip().lower() in ("true", "1", "yes")
 
@@ -655,6 +679,8 @@ def load_playlist_settings(playlist_name):
     for key, allowed, fallback in (
         ("push_mode", ("all", "main_only", "sections_only"), "all"),
         ("download_mode", ("main_only", "all", "sections_only"), "main_only"),
+        ("pull_mode", ("main_only", "all", "sections_only"), "main_only"),
+        ("m3u8_mode", ("main_only", "all", "sections_only"), "all"),
     ):
         raw_val = entry.get(key)
         if isinstance(raw_val, str):

@@ -315,9 +315,97 @@ def command_list(args, settings, playlist_data):
 
 
 
-def command_pull(args, settings, playlist_data):
-    """Pulls a remote YouTube playlist into a local text file."""
+def _fetch_remote_playlist_tracks(playlist_id, settings, entry_fields, pull_method="auto", oauth_client=None, account=None, args=None, pl_settings=None):
+    """
+    Fetches live tracks for playlist_id using yt-dlp, falling back to YouTube API.
+    Returns (pulled_video_ids, pulled_titles, pulled_metadata, method_used, pages_read, quota_units, oauth_client)
+    or (None, None, None, None, 0, 0, None) on failure.
+    """
     from .downloader import fetch_playlist_tracks_ytdlp, fill_missing_metadata
+
+    pulled_video_ids = None
+    pulled_titles = {}
+    pulled_metadata = {}
+    method_used = "yt-dlp"
+    pages_read = 0
+    quota_units = 0
+
+    if pull_method in ("auto", "ytdlp"):
+        ytdlp_ids, ytdlp_titles, ytdlp_metadata = fetch_playlist_tracks_ytdlp(playlist_id, settings)
+        if ytdlp_ids is not None:
+            pulled_video_ids = ytdlp_ids
+            pulled_titles = ytdlp_titles
+            pulled_metadata = ytdlp_metadata or {}
+            fill_missing_metadata(pulled_video_ids, pulled_metadata, entry_fields, settings)
+            pulled_titles = _metadata_titles(pulled_metadata)
+            return pulled_video_ids, pulled_titles, pulled_metadata, "yt-dlp", 0, 0, None
+        else:
+            if pull_method == "ytdlp":
+                return None, None, None, None, 0, 0, None
+
+    # Fall back to API
+    if oauth_client is None:
+        oauth_client, account = _resolve_command_client(args, default_client=pl_settings.get("oauth_client") if pl_settings else None, default_account=pl_settings.get("account") if pl_settings else None)
+    youtube = get_youtube_service(oauth_client, account=account)
+
+    next_page_token = None
+    raw_items = []
+    page_num = 1
+
+    try:
+        while True:
+            res = youtube.playlistItems().list(
+                part="snippet",
+                playlistId=playlist_id,
+                maxResults=50,
+                pageToken=next_page_token
+            ).execute()
+            quota_units += 1
+
+            for item in res.get("items", []):
+                snippet = item.get("snippet", {})
+                v_id = snippet.get("resourceId", {}).get("videoId")
+                title = snippet.get("title", "Untitled")
+                channel = snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle", "")
+                pos = snippet.get("position", len(raw_items))
+                if v_id:
+                    raw_items.append((pos, v_id, {
+                        "id": v_id,
+                        "title": title,
+                        "channel": channel,
+                        "duration": "",
+                    }))
+
+            next_page_token = res.get("nextPageToken")
+            page_num += 1
+            if not next_page_token:
+                break
+
+    except HttpError as e:
+        status_code = e.resp.status if hasattr(e, "resp") else "Unknown"
+        if "quotaExceeded" in str(e) or status_code == 403:
+            print(f"[!] Error: Access forbidden (403). The playlist might be private or API quota was exceeded.\n    Details: {e}")
+        elif status_code == 404:
+            print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
+        else:
+            print(f"[!] YouTube API Error ({status_code}): {e}")
+        return None, None, None, None, page_num - 1, quota_units, oauth_client
+    except Exception as e:
+        print(f"[!] YouTube API Error while fetching tracks for '{playlist_id}': {e}")
+        return None, None, None, None, page_num - 1, quota_units, oauth_client
+
+    raw_items.sort(key=lambda x: x[0])
+    pulled_video_ids = [x[1] for x in raw_items]
+    pulled_metadata = {x[1]: x[2] for x in raw_items}
+    if "duration" in entry_fields:
+        quota_units += _enrich_metadata_via_api(youtube, pulled_video_ids, pulled_metadata, entry_fields)
+    pulled_titles = _metadata_titles(pulled_metadata)
+    pages_read = page_num - 1
+    return pulled_video_ids, pulled_titles, pulled_metadata, "api", pages_read, quota_units, oauth_client
+
+
+def command_pull(args, settings, playlist_data):
+    """Pulls a remote YouTube playlist into a local text file, with optional section playlist pulling."""
     from .config import load_playlist_settings
 
     target_name = args.target.strip()
@@ -341,11 +429,18 @@ def command_pull(args, settings, playlist_data):
         except Exception:
             pass
 
-
     pull_method = (getattr(args, "method", None) or settings.get("pull_method", "auto")).strip().lower()
     explicit_client = getattr(args, "client", None)
     if explicit_client:
         pull_method = "api"
+
+    # Resolve pull_mode
+    cli_pull_mode = getattr(args, "pull_mode", None)
+    if getattr(args, "sections", False):
+        cli_pull_mode = "all"
+    pull_mode = str(cli_pull_mode or pl_settings.get("pull_mode", "main_only")).strip().lower()
+    if pull_mode not in ("all", "main_only", "sections_only"):
+        pull_mode = "main_only"
 
     if playlist_id != target_name:
         print(f"[*] Target playlist '{target_name}' resolved to Playlist ID: {playlist_id}")
@@ -357,241 +452,264 @@ def command_pull(args, settings, playlist_data):
     pulled_metadata = {}
     method_used = "yt-dlp"
     oauth_client = None
+    account = None
     pages_read = 0
     quota_units = 0
 
-    if pull_method in ("auto", "ytdlp"):
-        print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' using yt-dlp (0 Google API quota)...")
-        ytdlp_ids, ytdlp_titles, ytdlp_metadata = fetch_playlist_tracks_ytdlp(playlist_id, settings)
-        if ytdlp_ids is not None:
-            pulled_video_ids = ytdlp_ids
-            pulled_titles = ytdlp_titles
-            pulled_metadata = ytdlp_metadata or {}
-            # The playlist listing may omit some fields (e.g. duration); fill any gaps per video.
-            fill_missing_metadata(pulled_video_ids, pulled_metadata, entry_fields, settings)
-            pulled_titles = _metadata_titles(pulled_metadata)
-            method_used = "yt-dlp"
-        else:
-            if pull_method == "ytdlp":
-                print(f"[!] Error: Could not pull playlist tracks via yt-dlp. Make sure the playlist is public/unlisted.")
-                return
-            print(f"[*] yt-dlp could not access playlist tracks (it may be private). Falling back to YouTube API...")
-
-    if pulled_video_ids is None:
-        # Resolve which oauth-client JSON to use for this operation
-        oauth_client, account = _resolve_command_client(args, default_client=pl_settings.get("oauth_client"), default_account=pl_settings.get("account"))
-        youtube = get_youtube_service(oauth_client, account=account)
-        print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}' via YouTube API...")
-
-        next_page_token = None
-        raw_items = []
-        page_num = 1
-        quota_units = 0
-
-        try:
-            while True:
-                print(f"    Fetching page {page_num}...")
-                res = youtube.playlistItems().list(
-                    part="snippet",
-                    playlistId=playlist_id,
-                    maxResults=50,
-                    pageToken=next_page_token
-                ).execute()
-                quota_units += 1  # 1 unit per playlistItems.list call
-
-                for item in res.get("items", []):
-                    snippet = item.get("snippet", {})
-                    v_id = snippet.get("resourceId", {}).get("videoId")
-                    title = snippet.get("title", "Untitled")
-                    channel = snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle", "")
-                    pos = snippet.get("position", len(raw_items))
-                    if v_id:
-                        raw_items.append((pos, v_id, {
-                            "id": v_id,
-                            "title": title,
-                            "channel": channel,
-                            "duration": "",
-                        }))
-
-                next_page_token = res.get("nextPageToken")
-                page_num += 1
-                if not next_page_token:
-                    break
-
-        except HttpError as e:
-            status_code = e.resp.status if hasattr(e, "resp") else "Unknown"
-            if "quotaExceeded" in str(e) or status_code == 403:
-                print(f"[!] Error: Access forbidden (403). The playlist might be private or API quota was exceeded.\n    Details: {e}")
-                record_activity(playlist_data, playlist_name, "pull (quota exceeded)")
-                log_playlist_event(
-                    settings,
-                    playlist_name,
-                    "pull (ABANDONED - QUOTA EXCEEDED)",
-                    oauth_client,
-                    summary_lines=[
-                        "Pull operation abandoned: YouTube API quota exceeded or 403 forbidden",
-                        f"{quota_units} quota unit(s) consumed prior to abandonment"
-                    ],
-                    detail_lines=[f"Details: {e}"],
-                    playlist_data=playlist_data
-                )
-            elif status_code == 404:
-                print(f"[!] Error: Playlist '{playlist_id}' not found (404). Check the ID or playlist name.")
-            else:
-                print(f"[!] YouTube API Error ({status_code}): {e}")
-            return
-
-        # Ensure items are ordered by their actual position in the playlist
-        raw_items.sort(key=lambda x: x[0])
-        pulled_video_ids = [x[1] for x in raw_items]
-        pulled_metadata = {x[1]: x[2] for x in raw_items}
-        if "duration" in entry_fields:
-            # Only duration needs the extra videos.list call (title/channel come with the playlist items)
-            quota_units += _enrich_metadata_via_api(youtube, pulled_video_ids, pulled_metadata, entry_fields)
-        pulled_titles = _metadata_titles(pulled_metadata)
-        pages_read = page_num - 1
-        method_used = "api"
-
-    if existing_sections_data is None:
-        existing_sections_data = {}
-    existing_sections_data["video_metadata"] = pulled_metadata
-
-    # Diff calculation comparing existing local playlist vs pulled YouTube playlist
-    current_list = []
-    for vid in existing_video_ids:
-        title = existing_titles.get(vid, pulled_titles.get(vid, vid))
-        current_list.append({"videoId": vid, "title": title})
-
-    target_counts = {}
-    for vid in pulled_video_ids:
-        target_counts[vid] = target_counts.get(vid, 0) + 1
-
-    # 1. Deletions from local playlist (present locally, removed on YouTube)
     deleted_count = 0
-    deleted_details = []
-    curr_counts = {}
-    for item in current_list:
-        v = item["videoId"]
-        curr_counts[v] = curr_counts.get(v, 0) + 1
-
-    for i in range(len(current_list) - 1, -1, -1):
-        item = current_list[i]
-        vid = item["videoId"]
-        target_allowed = target_counts.get(vid, 0)
-        if curr_counts.get(vid, 0) > target_allowed:
-            track_title = item.get("title", vid)
-            print(f"[-] Deleting track from local playlist: '{track_title}' ({vid})")
-            deleted_count += 1
-            deleted_details.append(f"- Removed: '{vid}' | {track_title}")
-            current_list.pop(i)
-            curr_counts[vid] -= 1
-
-    # 2. Insertions into local playlist (new tracks added on YouTube)
     inserted_count = 0
-    inserted_details = []
-    active_counts = {}
-    for item in current_list:
-        v = item["videoId"]
-        active_counts[v] = active_counts.get(v, 0) + 1
-
-    target_seen_counts = {}
-    for pos, vid_id in enumerate(pulled_video_ids):
-        target_seen_counts[vid_id] = target_seen_counts.get(vid_id, 0) + 1
-        if target_seen_counts[vid_id] > active_counts.get(vid_id, 0):
-            track_title = pulled_titles.get(vid_id, vid_id)
-            print(f"[+] Inserting new track into local playlist at position {pos} ({vid_id})...")
-            item_info = {
-                "videoId": vid_id,
-                "title": track_title,
-                "position": pos
-            }
-            current_list.insert(pos, item_info)
-            active_counts[vid_id] = active_counts.get(vid_id, 0) + 1
-            inserted_count += 1
-            inserted_details.append(f"+ Inserted: '{vid_id}' | {track_title} (pos {pos})")
-            print(f"    [+] Inserted '{track_title}'")
-
-    # 3. Reordering in local playlist (tracks whose order changed on YouTube)
-    for idx, item in enumerate(current_list):
-        item["_id"] = idx
-    curr_item_ids = [item["_id"] for item in current_list]
-    target_item_ids = []
-    available_by_vid = {}
-    for item in current_list:
-        available_by_vid.setdefault(item["videoId"], []).append(item["_id"])
-    for vid in pulled_video_ids:
-        if vid in available_by_vid and available_by_vid[vid]:
-            target_item_ids.append(available_by_vid[vid].pop(0))
-
-    reorder_moves = compute_minimal_moves(curr_item_ids, target_item_ids)
     moved_count = 0
+    deleted_details = []
+    inserted_details = []
     moved_details = []
 
-    for item_id, target_pos in reorder_moves:
-        curr_ids = [it["_id"] for it in current_list]
-        from_idx = curr_ids.index(item_id)
-        item_info = current_list[from_idx]
-        vid_id = item_info["videoId"]
-        short_title = item_info["title"][:35]
-        print(f"[*] Moving '{short_title}...' -> position {target_pos} (from position {from_idx})")
-        moved_item = current_list.pop(from_idx)
-        moved_item["position"] = target_pos
-        current_list.insert(target_pos, moved_item)
-        moved_count += 1
-        moved_details.append(f"~ Reordered: '{vid_id}' | {item_info['title']} (pos {from_idx} -> pos {target_pos})")
+    # 1. Pull main playlist (unless in sections_only mode)
+    if pull_mode in ("all", "main_only"):
+        print(f"[*] Fetching live track list from YouTube for playlist '{playlist_id}'...")
+        res_vids, res_titles, res_meta, m_used, p_read, q_units, o_client = _fetch_remote_playlist_tracks(
+            playlist_id, settings, entry_fields, pull_method=pull_method,
+            oauth_client=oauth_client, account=account, args=args, pl_settings=pl_settings
+        )
+        if res_vids is None:
+            print(f"[!] Error: Could not pull main playlist tracks.")
+            return
 
-    if deleted_count == 0 and inserted_count == 0 and moved_count == 0:
+        pulled_video_ids = res_vids
+        pulled_titles = res_titles
+        pulled_metadata = res_meta
+        method_used = m_used
+        pages_read += p_read
+        quota_units += q_units
+        if o_client:
+            oauth_client = o_client
+
+        if existing_sections_data is None:
+            existing_sections_data = {}
+        existing_sections_data["video_metadata"] = pulled_metadata
+
+        # Diff calculation comparing existing local playlist vs pulled YouTube playlist
+        current_list = []
+        for vid in existing_video_ids:
+            title = existing_titles.get(vid, pulled_titles.get(vid, vid))
+            current_list.append({"videoId": vid, "title": title})
+
+        target_counts = {}
+        for vid in pulled_video_ids:
+            target_counts[vid] = target_counts.get(vid, 0) + 1
+
+        curr_counts = {}
+        for item in current_list:
+            v = item["videoId"]
+            curr_counts[v] = curr_counts.get(v, 0) + 1
+
+        for i in range(len(current_list) - 1, -1, -1):
+            item = current_list[i]
+            vid = item["videoId"]
+            target_allowed = target_counts.get(vid, 0)
+            if curr_counts.get(vid, 0) > target_allowed:
+                track_title = item.get("title", vid)
+                print(f"[-] Deleting track from local playlist: '{track_title}' ({vid})")
+                deleted_count += 1
+                deleted_details.append(f"- Removed: '{vid}' | {track_title}")
+                current_list.pop(i)
+                curr_counts[vid] -= 1
+
+        active_counts = {}
+        for item in current_list:
+            v = item["videoId"]
+            active_counts[v] = active_counts.get(v, 0) + 1
+
+        target_seen_counts = {}
+        for pos, vid_id in enumerate(pulled_video_ids):
+            target_seen_counts[vid_id] = target_seen_counts.get(vid_id, 0) + 1
+            if target_seen_counts[vid_id] > active_counts.get(vid_id, 0):
+                track_title = pulled_titles.get(vid_id, vid_id)
+                print(f"[+] Inserting new track into local playlist at position {pos} ({vid_id})...")
+                item_info = {
+                    "videoId": vid_id,
+                    "title": track_title,
+                    "position": pos
+                }
+                current_list.insert(pos, item_info)
+                active_counts[vid_id] = active_counts.get(vid_id, 0) + 1
+                inserted_count += 1
+                inserted_details.append(f"+ Inserted: '{vid_id}' | {track_title} (pos {pos})")
+                print(f"    [+] Inserted '{track_title}'")
+
+        for idx, item in enumerate(current_list):
+            item["_id"] = idx
+        curr_item_ids = [item["_id"] for item in current_list]
+        target_item_ids = []
+        available_by_vid = {}
+        for item in current_list:
+            available_by_vid.setdefault(item["videoId"], []).append(item["_id"])
+        for vid in pulled_video_ids:
+            if vid in available_by_vid and available_by_vid[vid]:
+                target_item_ids.append(available_by_vid[vid].pop(0))
+
+        reorder_moves = compute_minimal_moves(curr_item_ids, target_item_ids)
+        for item_id, target_pos in reorder_moves:
+            curr_ids = [it["_id"] for it in current_list]
+            from_idx = curr_ids.index(item_id)
+            item_info = current_list[from_idx]
+            vid_id = item_info["videoId"]
+            short_title = item_info["title"][:35]
+            print(f"[*] Moving '{short_title}...' -> position {target_pos} (from position {from_idx})")
+            moved_item = current_list.pop(from_idx)
+            moved_item["position"] = target_pos
+            current_list.insert(target_pos, moved_item)
+            moved_count += 1
+            moved_details.append(f"~ Reordered: '{vid_id}' | {item_info['title']} (pos {from_idx} -> pos {target_pos})")
+
+        # Initial reconciliation with local sections
+        if existing_sections_data and existing_sections_data.get("is_sectioned"):
+            existing_id_set = set(existing_video_ids)
+            pulled_id_set = set(pulled_video_ids)
+            new_inserted_ids = [vid for vid in pulled_video_ids if vid not in existing_id_set]
+            deleted_ids_set = existing_id_set - pulled_id_set
+
+            for sec in existing_sections_data.get("sections", []):
+                sec["video_ids"] = [v for v in sec.get("video_ids", []) if v not in deleted_ids_set]
+
+            if new_inserted_ids:
+                unorganized = None
+                for sec in existing_sections_data.get("sections", []):
+                    if sec.get("title", "").strip().lower() in ("unorganized", "uncategorized", "sectionless", "unsorted"):
+                        unorganized = sec
+                        break
+                if unorganized is None:
+                    unorganized = {
+                        "title": "Unorganized",
+                        "playlist_id": None,
+                        "url": None,
+                        "video_ids": [],
+                        "blank_above": set(),
+                        "header_blank_above": True,
+                        "is_implicit": False,
+                    }
+                    existing_sections_data["sections"].append(unorganized)
+
+                for new_v in new_inserted_ids:
+                    if new_v not in unorganized["video_ids"]:
+                        unorganized["video_ids"].append(new_v)
+    else:
+        # sections_only mode
+        pulled_video_ids = list(existing_video_ids)
+        pulled_titles = dict(existing_titles)
+        if existing_sections_data is None:
+            existing_sections_data = {}
+        pulled_metadata = existing_sections_data.get("video_metadata", {})
+
+    # 2. Pull linked section playlists if pull_mode in ("all", "sections_only")
+    sections_pulled_count = 0
+    if existing_sections_data and existing_sections_data.get("is_sectioned") and pull_mode in ("all", "sections_only"):
+        explicit_sections = [
+            s for s in existing_sections_data.get("sections", [])
+            if not s.get("is_implicit") and s.get("playlist_id") and s.get("playlist_id") != playlist_id
+        ]
+        if explicit_sections:
+            print(f"\n[*] pull_mode = '{pull_mode}': Checking {len(explicit_sections)} linked section playlist(s) on YouTube...")
+            for sec in explicit_sections:
+                sec_id = sec["playlist_id"]
+                sec_title = sec.get("title") or sec_id
+                print(f"\n[+] Pulling section '{sec_title}' -> YouTube Playlist: {sec_id}")
+                s_vids, s_titles, s_meta, s_method, s_pages, s_quota, s_client = _fetch_remote_playlist_tracks(
+                    sec_id, settings, entry_fields, pull_method=pull_method,
+                    oauth_client=oauth_client, account=account, args=args, pl_settings=pl_settings
+                )
+                if s_vids is None:
+                    print(f"    [!] Warning: Could not fetch tracks for section '{sec_title}' ({sec_id}). Skipping.")
+                    continue
+
+                quota_units += s_quota
+                pages_read += s_pages
+                sections_pulled_count += 1
+                if s_method == "api":
+                    method_used = "api"
+                    if s_client:
+                        oauth_client = s_client
+
+                pulled_metadata.update(s_meta)
+                pulled_titles.update(s_titles)
+
+                old_sec_vids = list(sec.get("video_ids", []))
+                sec["video_ids"] = list(s_vids)
+
+                new_in_sec = [v for v in s_vids if v not in old_sec_vids]
+                del_in_sec = [v for v in old_sec_vids if v not in s_vids]
+
+                if new_in_sec or del_in_sec:
+                    print(f"    [+] Section '{sec_title}': {len(new_in_sec)} track(s) added, {len(del_in_sec)} track(s) removed on YouTube.")
+
+                # If any new_in_sec were sitting in Unorganized, remove them from Unorganized
+                if new_in_sec:
+                    for unorg in existing_sections_data.get("sections", []):
+                        if unorg.get("title", "").strip().lower() in ("unorganized", "unsorted", "uncategorized", "sectionless"):
+                            unorg["video_ids"] = [v for v in unorg.get("video_ids", []) if v not in new_in_sec]
+
+                # If any s_vids are not in pulled_video_ids at all, append them!
+                for sv in s_vids:
+                    if sv not in pulled_video_ids:
+                        pulled_video_ids.append(sv)
+                        inserted_count += 1
+                        inserted_details.append(f"+ Added from section '{sec_title}': '{sv}' | {s_titles.get(sv, sv)}")
+
+    # In sections_only mode, order the overall pulled_video_ids according to sections
+    if pull_mode == "sections_only" and existing_sections_data and existing_sections_data.get("sections"):
+        sec_ordered = []
+        for s in existing_sections_data["sections"]:
+            for v in s.get("video_ids", []):
+                if v not in sec_ordered:
+                    sec_ordered.append(v)
+        pulled_video_ids = sec_ordered
+
+    # Clean up empty Unorganized sections
+    if existing_sections_data and existing_sections_data.get("sections"):
+        existing_sections_data["sections"] = [
+            s for s in existing_sections_data["sections"]
+            if s.get("video_ids") or s.get("title", "").strip().lower() not in ("unorganized", "unsorted", "uncategorized", "sectionless")
+        ]
+
+    # Deduplicate if allow_duplicates is False
+    if not pl_settings.get("allow_duplicates", True):
+        seen_dedup = set()
+        clean_vids = []
+        for vid in pulled_video_ids:
+            if vid not in seen_dedup:
+                seen_dedup.add(vid)
+                clean_vids.append(vid)
+        pulled_video_ids = clean_vids
+
+        if existing_sections_data and existing_sections_data.get("sections"):
+            seen_sec_dedup = set()
+            for s in existing_sections_data["sections"]:
+                svids = []
+                for v in s.get("video_ids", []):
+                    if v not in seen_sec_dedup:
+                        seen_sec_dedup.add(v)
+                        svids.append(v)
+                s["video_ids"] = svids
+
+    if deleted_count == 0 and inserted_count == 0 and moved_count == 0 and sections_pulled_count == 0:
         print("[+] Local playlist is already up-to-date with YouTube.")
 
-    # Reconcile sections if local file is sectioned
-    if existing_sections_data and existing_sections_data.get("is_sectioned"):
-        existing_id_set = set(existing_video_ids)
-        pulled_id_set = set(pulled_video_ids)
-        new_inserted_ids = [vid for vid in pulled_video_ids if vid not in existing_id_set]
-        deleted_ids_set = existing_id_set - pulled_id_set
-
-        # Remove deleted tracks from existing sections
-        for sec in existing_sections_data.get("sections", []):
-            sec["video_ids"] = [v for v in sec.get("video_ids", []) if v not in deleted_ids_set]
-
-        # Put new tracks into ## Unorganized section at the end
-        if new_inserted_ids:
-            unorganized = None
-            for sec in existing_sections_data.get("sections", []):
-                if sec.get("title", "").strip().lower() in ("unorganized", "uncategorized", "sectionless"):
-                    unorganized = sec
-                    break
-            if unorganized is None:
-                unorganized = {
-                    "title": "Unorganized",
-                    "playlist_id": None,
-                    "url": None,
-                    "video_ids": [],
-                    "blank_above": set(),
-                    "header_blank_above": True,
-                    "is_implicit": False,
-                }
-                existing_sections_data["sections"].append(unorganized)
-
-            for new_v in new_inserted_ids:
-                if new_v not in unorganized["video_ids"]:
-                    unorganized["video_ids"].append(new_v)
-
-        if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
-            return
-    else:
-        if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
-            return
+    if not save_playlist_file(file_path, pulled_video_ids, pulled_titles, blank_above=existing_blank_above, sections_data=existing_sections_data):
+        return
 
     print("\n" + "=" * 60)
     print(" Pull Summary")
     print("=" * 60)
+    print(f"  * {'Pull Mode:':<22} {pull_mode}")
     if method_used == "yt-dlp":
         print(f"  * {'Method:':<22} yt-dlp (0 Google API quota)")
-    else:
+    elif method_used == "api":
         print(f"  * {'OAuth Client:':<22} {oauth_client}")
         print(f"  * {'Pages Read:':<22} {pages_read:>4d} request(s)")
+    else:
+        print(f"  * {'Method:':<22} Local / Sections")
     print(f"  * {'Tracks Fetched:':<22} {len(pulled_video_ids):>4d} track(s)")
+    if sections_pulled_count > 0:
+        print(f"  * {'Sections Pulled:':<22} {sections_pulled_count:>4d} section playlist(s)")
     print(f"  * {'Deleted:':<22} {deleted_count:>4d} track(s)")
     print(f"  * {'Inserted:':<22} {inserted_count:>4d} track(s)")
     print(f"  * {'Reordered:':<22} {moved_count:>4d} track(s)")
@@ -609,7 +727,7 @@ def command_pull(args, settings, playlist_data):
         "pull",
         oauth_client if method_used == "api" else "yt-dlp",
         summary_lines=[
-            f"Fetched {len(pulled_video_ids)} track(s) via {method_used} ({quota_units} quota units): "
+            f"Fetched {len(pulled_video_ids)} track(s) via {method_used} (mode: {pull_mode}, {quota_units} quota units): "
             f"{inserted_count} inserted, {deleted_count} deleted, {moved_count} reordered"
         ],
         detail_lines=diff_details if diff_details else ["No changes required (already in sync)"],
@@ -1108,6 +1226,32 @@ def command_format(args, settings, playlist_data):
         print("[!] Error: No valid video IDs or URLs found in the file.")
         return
 
+    # Deduplication: purge duplicates if allow_duplicates is False or --dedup flag is passed
+    dedup_requested = getattr(args, "dedup", False) or not pl_settings.get("allow_duplicates", True)
+    duplicates_removed = 0
+    if dedup_requested:
+        seen_ids = set()
+        deduped_ids = []
+        for vid in target_video_ids:
+            if vid in seen_ids:
+                duplicates_removed += 1
+                continue
+            seen_ids.add(vid)
+            deduped_ids.append(vid)
+
+        if duplicates_removed > 0:
+            target_video_ids = deduped_ids
+            # Update sections_data to also remove duplicates across sections
+            seen_sec_ids = set()
+            for sec in sections_data.get("sections", []):
+                sec_vids = []
+                for vid in sec.get("video_ids", []):
+                    if vid not in seen_sec_ids:
+                        seen_sec_ids.add(vid)
+                        sec_vids.append(vid)
+                sec["video_ids"] = sec_vids
+            print(f"[*] Purged {duplicates_removed} duplicate track(s) from playlist (allow_duplicates = false).")
+
     # Check and format main header if needed
     if sections_data.get("main_header"):
         m_hdr = sections_data["main_header"]
@@ -1204,6 +1348,8 @@ def command_format(args, settings, playlist_data):
     if oauth_client:
         print(f"  * {'OAuth Client:':<24} {oauth_client}")
     print(f"  * {'Total Tracks:':<24} {len(target_video_ids):>4d} track(s)")
+    if dedup_requested or duplicates_removed > 0:
+        print(f"  * {'Duplicates Removed:':<24} {duplicates_removed:>4d} track(s)")
     if missing_ids:
         print(f"  * {'Metadata Enriched:':<24} {filled:>4d} track(s)")
         if still_missing:

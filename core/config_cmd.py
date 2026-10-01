@@ -29,6 +29,8 @@ ALLOWED_PLAYLIST_SETTINGS = {
     "format": ("audio", "video"),
     "push_mode": ("all", "main_only", "sections_only"),
     "download_mode": ("main_only", "all", "sections_only"),
+    "pull_mode": ("main_only", "all", "sections_only"),
+    "m3u8_mode": ("main_only", "all", "sections_only"),
     "folder_name_source": ("alias", "header"),
 }
 
@@ -38,6 +40,8 @@ BOOLEAN_PLAYLIST_KEYS = {
     "atomic_writes",
     "number_section_folders",
     "include_playlist_name_in_sections",
+    "generate_m3u8",
+    "allow_duplicates",
 }
 
 BOOLEAN_GLOBAL_KEYS = {
@@ -175,6 +179,10 @@ def _list_playlist_settings(playlist_name, pl_settings):
         ("number_files", "Prefix filenames with order: 01 - Track"),
         ("push_mode", "Sync on push: all, main_only, sections_only"),
         ("download_mode", "Layout: main_only, all, sections_only"),
+        ("pull_mode", "Sync on pull: main_only, all, sections_only"),
+        ("generate_m3u8", "Create/update .m3u8 playlists for folders"),
+        ("m3u8_mode", "M3U8 mode: main_only, all (with sections), sections_only"),
+        ("allow_duplicates", "Allow duplicate tracks (false = format dedups)"),
         ("playlist_entry_format", "Format line structure (%(id)s | %(title)s)"),
         ("download_path", "Custom download folder (blank = default)"),
         ("folder_name_source", "Folder name in 'all' mode: alias or header"),

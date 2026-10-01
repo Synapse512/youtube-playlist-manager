@@ -592,9 +592,12 @@ def parse_playlist_file(file_path, entry_format=None):
             vid_id, metadata = parse_playlist_entry_line(line_str, entry_format)
             if vid_id:
                 target_video_ids.append(vid_id)
-                video_metadata[vid_id] = metadata
+                if vid_id not in video_metadata:
+                    video_metadata[vid_id] = metadata
+                elif not video_metadata[vid_id].get("title") and metadata.get("title"):
+                    video_metadata[vid_id] = metadata
                 title_candidate = metadata.get("title", "")
-                if title_candidate:
+                if title_candidate and (vid_id not in target_video_titles or not target_video_titles[vid_id]):
                     target_video_titles[vid_id] = title_candidate
                 if blank_pending:
                     blank_above.add(vid_id)

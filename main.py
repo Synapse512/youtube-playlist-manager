@@ -64,6 +64,8 @@ def main():
         pull_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         pull_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
         pull_parser.add_argument("--method", "-m", choices=["auto", "ytdlp", "api"], default=None, help="Pull method: auto (default), ytdlp (0 quota), or api (OAuth)")
+        pull_parser.add_argument("--sections", "-s", action="store_true", help="Pull linked section playlists as well as the main playlist")
+        pull_parser.add_argument("--pull-mode", choices=["all", "main_only", "sections_only"], default=None, help="Pull mode: main_only (default), all, or sections_only")
         pull_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: push
@@ -78,6 +80,7 @@ def main():
         format_parser.add_argument("target", nargs="?")
         format_parser.add_argument("--client", "-c", default=None, metavar="CLIENT_NAME")
         format_parser.add_argument("--account", "-a", default=None, metavar="EMAIL", help="Google account email to use (skips the account picker)")
+        format_parser.add_argument("--dedup", "-d", action="store_true", help="Purge duplicate tracks, keeping the first occurrence")
         format_parser.add_argument("-h", "--help", action="store_true")
 
         # Command: ai-format (aliases: ai-organize)

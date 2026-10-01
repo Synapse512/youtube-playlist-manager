@@ -673,61 +673,6 @@ def _folder_has_media(folder):
     return any(_is_media_filename(fname) for fname in entries)
 
 
-def _move_flat_download_cache_to_subfolder(playlist_download_dir, subfolder_name):
-    """
-    Moves legacy flat playlist downloads into a layout subfolder.
-    Used when a playlist that was previously downloaded as main_only is changed
-    to a sectioned download mode that expects FULL_PLAYLIST.
-    """
-    if not os.path.isdir(playlist_download_dir):
-        return 0
-
-    subfolder_dir = os.path.join(playlist_download_dir, subfolder_name)
-    root_manifest_path = os.path.join(playlist_download_dir, DOWNLOAD_MANIFEST_FILENAME)
-    moved_count = 0
-
-    try:
-        entries = os.listdir(playlist_download_dir)
-    except OSError:
-        return 0
-
-    media_files = []
-    for fname in entries:
-        fpath = os.path.join(playlist_download_dir, fname)
-        if os.path.isfile(fpath) and _is_media_filename(fname):
-            media_files.append(fname)
-
-    has_manifest = os.path.isfile(root_manifest_path)
-    if not media_files and not has_manifest:
-        return 0
-
-    os.makedirs(subfolder_dir, exist_ok=True)
-
-    for fname in media_files:
-        src = os.path.join(playlist_download_dir, fname)
-        dst = os.path.join(subfolder_dir, fname)
-        try:
-            if not os.path.exists(dst):
-                shutil.move(src, dst)
-                moved_count += 1
-        except OSError as exc:
-            print(f"    [!] Could not move '{fname}' into '{subfolder_name}': {exc}")
-
-    if has_manifest:
-        root_manifest = load_playlist_manifest(playlist_download_dir)
-        dest_manifest = load_playlist_manifest(subfolder_dir)
-        merged_tracks = dest_manifest.get("tracks", {})
-        merged_tracks.update(root_manifest.get("tracks", {}))
-        save_playlist_manifest(subfolder_dir, {"tracks": merged_tracks})
-        try:
-            os.remove(root_manifest_path)
-        except OSError:
-            pass
-
-    if moved_count:
-        print(f"[*] Moved {moved_count} existing flat download(s) into '{subfolder_name}' for the new download layout.")
-    return moved_count
-
 
 def _detect_folder_format(folder):
     """Returns 'audio', 'video', or None if the folder is empty or has no recognisable media."""
@@ -1759,6 +1704,147 @@ def _populate_from_playlist_cache(folder_dir, target_video_ids, target_video_tit
     return copied_count
 
 
+def generate_m3u8_file(folder_dir, video_ids, video_titles, manifest_tracks=None, playlist_name=None):
+    """
+    Generates or updates a UTF-8 .m3u8 playlist file in folder_dir for the tracks
+    present in that folder, ordered by video_ids.
+    Returns the path of the created .m3u8 file or None.
+    """
+    if not os.path.isdir(folder_dir):
+        return None
+    if manifest_tracks is None:
+        manifest_tracks = load_playlist_manifest(folder_dir).get("tracks", {})
+
+    entries = []
+    for vid in video_ids:
+        fname = manifest_tracks.get(vid)
+        if not fname:
+            continue
+        fpath = os.path.join(folder_dir, fname)
+        if os.path.isfile(fpath):
+            title = (video_titles.get(vid) or "").strip() or os.path.splitext(fname)[0]
+            entries.append((title, fname))
+
+    if not entries:
+        return None
+
+    base_name = sanitize_filename(playlist_name or os.path.basename(folder_dir))
+    m3u8_path = os.path.join(folder_dir, f"{base_name}.m3u8")
+
+    lines = ["#EXTM3U\n"]
+    for title, fname in entries:
+        lines.append(f"#EXTINF:-1,{title}\n")
+        lines.append(f"{fname}\n")
+
+    temp_path = f"{m3u8_path}.__tmp_{uuid.uuid4().hex[:8]}__"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        if os.path.exists(m3u8_path):
+            os.replace(temp_path, m3u8_path)
+        else:
+            os.rename(temp_path, m3u8_path)
+        return m3u8_path
+    except Exception as e:
+        print(f"    [!] Warning: Could not write .m3u8 playlist to '{m3u8_path}': {e}")
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return None
+
+
+def sync_folder_m3u8_files(folder_dir, target_video_ids, target_video_titles, sections_data, pl_settings, playlist_name=None, manifest_tracks=None):
+    """
+    Synchronizes .m3u8 playlist files in folder_dir based on pl_settings['generate_m3u8']
+    and pl_settings['m3u8_mode'] ('main_only', 'all', 'sections_only').
+    Returns a list of created/updated .m3u8 paths.
+    """
+    if not pl_settings or not pl_settings.get("generate_m3u8", True):
+        return []
+    if not os.path.isdir(folder_dir):
+        return []
+
+    if manifest_tracks is None:
+        manifest_tracks = load_playlist_manifest(folder_dir).get("tracks", {})
+
+    m3u8_mode = str(pl_settings.get("m3u8_mode", "all") or "all").strip().lower()
+    if m3u8_mode not in ("main_only", "all", "sections_only"):
+        m3u8_mode = "all"
+
+    sections = sections_data.get("sections", []) if isinstance(sections_data, dict) else (sections_data or [])
+    explicit_sections = [s for s in sections if not s.get("is_implicit")]
+    has_sections = len(explicit_sections) > 0
+
+    main_name = sanitize_filename(playlist_name or os.path.basename(folder_dir))
+    main_m3u8_filename = f"{main_name}.m3u8"
+    main_m3u8_path = os.path.join(folder_dir, main_m3u8_filename)
+
+
+    expected_section_files = {}  # filename -> (sec_base, sec_vids)
+    if has_sections:
+        sec_pad_width = max(2, len(str(len(explicit_sections))))
+        for sec_idx, sec in enumerate(explicit_sections, 1):
+            raw_title = sec.get("title") or sec.get("playlist_id") or f"Section {sec_idx}"
+            sec_base = sanitize_filename(f"{sec_idx:0{sec_pad_width}d} - {raw_title}")
+            sec_filename = f"{sec_base}.m3u8"
+            sec_vids = sec.get("video_ids", [])
+            if sec_vids:
+                expected_section_files[sec_filename] = (sec_base, sec_vids)
+
+    updated_files = []
+
+    # 1. Main .m3u8 file
+    if m3u8_mode in ("main_only", "all") or not has_sections:
+        p = generate_m3u8_file(folder_dir, target_video_ids, target_video_titles, manifest_tracks, playlist_name=main_name)
+        if p:
+            updated_files.append(p)
+    elif m3u8_mode == "sections_only" and os.path.isfile(main_m3u8_path):
+        try:
+            os.remove(main_m3u8_path)
+        except OSError:
+            pass
+
+    # 2. Section .m3u8 files
+    if m3u8_mode in ("all", "sections_only") and has_sections:
+        for sec_filename, (sec_base, sec_vids) in expected_section_files.items():
+            p = generate_m3u8_file(folder_dir, sec_vids, target_video_titles, manifest_tracks, playlist_name=sec_base)
+            if p:
+                updated_files.append(p)
+    elif m3u8_mode == "main_only":
+        # Clean up any lingering numbered section m3u8s from a prior 'all' run
+        for sec_filename in expected_section_files:
+            sec_p = os.path.join(folder_dir, sec_filename)
+            if os.path.isfile(sec_p):
+                try:
+                    os.remove(sec_p)
+                except OSError:
+                    pass
+
+    return updated_files
+
+
+def cleanup_root_m3u8_files(playlist_download_dir):
+    """
+    Cleans up any loose .m3u8 playlist files in the root download directory,
+    ensuring all .m3u8 files live exclusively inside the subfolders (e.g. '<Playlist> (Full)/').
+    """
+    if not os.path.isdir(playlist_download_dir):
+        return
+    try:
+        for fname in os.listdir(playlist_download_dir):
+            if fname.lower().endswith(".m3u8"):
+                fpath = os.path.join(playlist_download_dir, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+
+
 def _execute_folder_download(folder_dir, target_video_ids, target_video_titles, fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt, parent_cache_dir=None, retry_failed_state=None, playlist_root_dir=None, pl_settings=None, args=None):
     """
     Downloads and synchronizes tracks for a single directory (main playlist or section subfolder).
@@ -1912,6 +1998,8 @@ def _execute_folder_download(folder_dir, target_video_ids, target_video_titles, 
         if skipped_failed:
             print(f"[*] Skipped {len(skipped_failed)} previously-failed track(s) in '{os.path.basename(folder_dir)}' "
                   f"(set 'retry_failed_downloads = \"ask\"' in settings.toml to be prompted, or use --retry-failed to force).")
+        if pl_settings and pl_settings.get("generate_m3u8", True):
+            generate_m3u8_file(folder_dir, target_video_ids, target_video_titles, manifest_tracks)
         return 0, len(already_cached), deleted_files
 
     bot_detected = _run_ytdlp_batch(
@@ -1979,6 +2067,8 @@ def _execute_folder_download(folder_dir, target_video_ids, target_video_titles, 
 
     newly_downloaded = len(set(manifest_tracks.keys()) - set(present_video_ids))
     save_playlist_manifest(folder_dir, {"tracks": manifest_tracks, "failed": manifest_failed})
+    if pl_settings and pl_settings.get("generate_m3u8", True):
+        generate_m3u8_file(folder_dir, target_video_ids, target_video_titles, manifest_tracks)
     return newly_downloaded, len(already_cached), deleted_files
 
 
@@ -2006,18 +2096,22 @@ def _execute_folder_download_safe(folder_dir, *args, **kwargs):
 
 def _resolve_full_playlist_folder_name(playlist_name, sections_data, pl_settings):
     """
-    Names the folder used for the complete, unsectioned download in download_mode =
-    'all' (previously always the literal string 'FULL_PLAYLIST'). Controlled by the
-    'folder_name_source' playlist setting:
+    Names the folder used for the complete, full playlist download (e.g. 'My Playlist (Full)').
+    Controlled by the 'folder_name_source' playlist setting:
       - 'header': the title from the playlist's main '### ' header, if one is set
-      - 'alias' (default), or 'header' with no header title available: the
-        playlist's own name/alias
+      - 'alias' (default), or 'header' with no header title available: the playlist's own name/alias
+    Appends ' (Full)' to clearly distinguish the full playlist subfolder from the root playlist directory.
     """
+    base = playlist_name
     if pl_settings.get("folder_name_source") == "header":
         header_title = ((sections_data or {}).get("main_header") or {}).get("title") or ""
         if header_title.strip():
-            return sanitize_filename(header_title.strip())
-    return sanitize_filename(playlist_name)
+            base = header_title.strip()
+
+    clean_base = sanitize_filename(base)
+    if clean_base.lower().endswith("(full)"):
+        return clean_base
+    return f"{clean_base} (Full)"
 
 
 
@@ -2164,13 +2258,12 @@ def command_download(args, settings, playlist_data, fmt=None):
             retry_failed_state["mode"] = False
 
     full_playlist_name = _resolve_full_playlist_folder_name(playlist_name, sections_data, pl_settings)
+    full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
 
     if is_sectioned and download_mode in ("all", "sections_only"):
         explicit_sections = [s for s in sections if not s.get("is_implicit")]
         sec_pad_width = max(2, len(str(len(explicit_sections))))
         if download_mode == "all":
-            full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
-            _move_flat_download_cache_to_subfolder(playlist_download_dir, full_playlist_name)
             print(f"[*] Download mode: 'all' (downloading '{full_playlist_name}' folder + {len(explicit_sections)} section folders)...")
             new_dl, cached, deleted = _execute_folder_download_safe(
                 full_playlist_dir, target_video_ids, target_video_titles,
@@ -2208,7 +2301,7 @@ def command_download(args, settings, playlist_data, fmt=None):
                 total_cached += s_cached
                 total_deleted += s_del
         else:  # sections_only
-            flat_cache_dir = playlist_download_dir if _folder_has_media(playlist_download_dir) else None
+            flat_cache_dir = full_playlist_dir if os.path.isdir(full_playlist_dir) else None
             print(f"[*] Download mode: 'sections_only' (downloading {len(explicit_sections)} section folders)...")
             for sec_idx, sec in enumerate(explicit_sections, 1):
                 raw_sec_name = sec.get("title") or sec.get("playlist_id") or "Section"
@@ -2233,13 +2326,10 @@ def command_download(args, settings, playlist_data, fmt=None):
                 total_cached += s_cached
                 total_deleted += s_del
     else:
-        # Default / main_only download.
-        # If the full-playlist subfolder already exists (from a prior 'all' run),
-        # keep downloading there so cached files are recognised and nothing re-downloads.
-        full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
-        effective_dir = full_playlist_dir if os.path.isdir(full_playlist_dir) else playlist_download_dir
+        # Default / main_only download into dedicated full playlist subfolder
+        print(f"[*] Downloading tracks to '{full_playlist_name}'...")
         new_dl, cached, deleted = _execute_folder_download_safe(
-            effective_dir, target_video_ids, target_video_titles,
+            full_playlist_dir, target_video_ids, target_video_titles,
             fmt, number_files, embed_thumbnail, settings, ytdlp_bin, ffmpeg_bin, js_rt,
             retry_failed_state=retry_failed_state,
             playlist_root_dir=playlist_download_dir,
@@ -2249,6 +2339,14 @@ def command_download(args, settings, playlist_data, fmt=None):
         total_new += new_dl
         total_cached += cached
         total_deleted += deleted
+
+    if pl_settings.get("generate_m3u8", True):
+        if os.path.isdir(full_playlist_dir):
+            sync_folder_m3u8_files(
+                full_playlist_dir, target_video_ids, target_video_titles, sections_data, pl_settings,
+                playlist_name=full_playlist_name,
+            )
+        cleanup_root_m3u8_files(playlist_download_dir)
 
     print("\n" + "=" * 60)
     print(" Download Summary")
@@ -2308,6 +2406,7 @@ def sync_downloaded_playlist_files(playlist_name, target_video_ids, target_video
     sections = sections_data.get("sections", []) if isinstance(sections_data, dict) else (sections_data or [])
     is_sectioned = bool(sections_data.get("is_sectioned") if isinstance(sections_data, dict) else any(not s.get("is_implicit") for s in sections))
     full_playlist_name = _resolve_full_playlist_folder_name(playlist_name, sections_data if isinstance(sections_data, dict) else {}, pl_settings)
+    full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
 
     folders_to_sync = []  # list of (folder_dir, video_ids)
 
@@ -2315,11 +2414,8 @@ def sync_downloaded_playlist_files(playlist_name, target_video_ids, target_video
         explicit_sections = [s for s in sections if not s.get("is_implicit")]
         sec_pad_width = max(2, len(str(len(explicit_sections))))
         if download_mode == "all":
-            full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
             if os.path.isdir(full_playlist_dir):
                 folders_to_sync.append((full_playlist_dir, target_video_ids))
-            elif _folder_has_media(playlist_download_dir):
-                folders_to_sync.append((playlist_download_dir, target_video_ids))
 
         for sec_idx, sec in enumerate(explicit_sections, 1):
             raw_sec_name = sec.get("title") or sec.get("playlist_id") or "Section"
@@ -2332,11 +2428,8 @@ def sync_downloaded_playlist_files(playlist_name, target_video_ids, target_video
             if os.path.isdir(sec_dir) and sec_vids:
                 folders_to_sync.append((sec_dir, sec_vids))
     else:
-        full_playlist_dir = os.path.join(playlist_download_dir, full_playlist_name)
         if os.path.isdir(full_playlist_dir):
             folders_to_sync.append((full_playlist_dir, target_video_ids))
-        elif os.path.isdir(playlist_download_dir) and _folder_has_media(playlist_download_dir):
-            folders_to_sync.append((playlist_download_dir, target_video_ids))
 
     total_renamed = 0
     for folder_dir, vids in folders_to_sync:
@@ -2353,5 +2446,20 @@ def sync_downloaded_playlist_files(playlist_name, target_video_ids, target_video
         if ren > 0:
             print(f"[*] Synchronized numbering for {ren} downloaded file(s) in '{os.path.basename(folder_dir)}'.")
             total_renamed += ren
+
+        if pl_settings.get("generate_m3u8", True):
+            if vids == target_video_ids:
+                m3u8_list = sync_folder_m3u8_files(
+                    folder_dir, vids, target_video_titles, sections_data, pl_settings,
+                    playlist_name=full_playlist_name, manifest_tracks=manifest_tracks
+                )
+            else:
+                m3u8_p = generate_m3u8_file(folder_dir, vids, target_video_titles, manifest_tracks)
+                m3u8_list = [m3u8_p] if m3u8_p else []
+            if m3u8_list and ren > 0:
+                print(f"[*] Updated playlist file(s) in '{os.path.basename(folder_dir)}'.")
+
+    if pl_settings.get("generate_m3u8", True):
+        cleanup_root_m3u8_files(playlist_download_dir)
 
     return total_renamed

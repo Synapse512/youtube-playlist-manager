@@ -183,9 +183,10 @@ Commands:
   list          python main.py list
                 Displays all configured playlists with their last CLI edit info.
 
-  pull          python main.py pull [<name>] [--method auto|ytdlp|api] [--client <name>] [--account <email>]
+  pull          python main.py pull [<name>] [--method auto|ytdlp|api] [--client <name>] [--account <email>] [--sections] [--pull-mode all|main_only|sections_only]
                 Downloads the live YouTube playlist into playlists/<name>.txt.
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
+                Use --sections to pull all linked section playlists as well as the main playlist.
                 (prompts to select playlist if omitted and multiple exist).
 
   push          python main.py push [<name>] [--client <name>] [--account <email>]
@@ -193,9 +194,10 @@ Commands:
                 automatically formats URLs/IDs to <video_id> | <video_title> format
                 (prompts to select playlist if omitted and multiple exist).
 
-  format        python main.py format [<name>] [--client <name>] [--account <email>]
+  format        python main.py format [<name>] [--client <name>] [--account <email>] [--dedup]
                 Normalizes URLs/IDs into <video_id> | <title> format for readability.
                 Uses yt-dlp by default (0 Google API quota; falls back to YouTube API if unavailable).
+                Use --dedup to purge duplicate tracks, keeping the first occurrence.
                 (prompts to select playlist if omitted and multiple exist).
 
   ai-format     python main.py ai-format [<name>] [--prompt <text>] [--provider <name>] [--model <model>] [--dry-run]

@@ -57,7 +57,20 @@
 # real YouTube title alongside your own section name: "## <url> | <your name> | <real title>"
 # include_playlist_name_in_sections = false
 #
+# Which playlists to pull from YouTube on 'pull': "main_only" (default), "all", or "sections_only"
+# pull_mode = "main_only"
+#
+# Generate and update UTF-8 .m3u8 playlist files for folders and sections whenever downloads or sync run
+# generate_m3u8 = true
+#
+# Which .m3u8 playlist files to generate: "all" (main + section .m3u8s, default), "main_only", or "sections_only"
+# m3u8_mode = "all"
+#
+# Allow duplicate tracks in the playlist file (if false, running `format` removes duplicate tracks)
+# allow_duplicates = true
+#
 # Custom instructions to automatically use for 'ai-format' without prompting
 # ai_prompt = "Group into sections by genre: Hip Hop, R&B, Rock, Ambient"
+
 
 

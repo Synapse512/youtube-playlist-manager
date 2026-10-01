@@ -30,7 +30,8 @@ Some examples of using ypm include:
   - [Managing Settings (`config` command)](#managing-settings-config-command)
   - [Global settings - `settings.toml`](#global-settings--settingstoml)
   - [Playlist settings - `playlist-settings.toml`](#playlist-settings--playlist-settingstoml)
-    - [All keys](#all-keys)
+    - [`pull_mode` explained](#pull_mode-explained)
+    - [`m3u8_mode` explained](#m3u8_mode-explained)
     - [`download_mode` explained](#download_mode-explained)
     - [Using `oauth_client` and `account`](#using-oauth_client-and-account)
 - [GOOGLE CLOUD SETUP](#google-cloud-setup)
@@ -98,6 +99,7 @@ youtube-playlist-manager/
 ├── playlist-downloads/      # downloaded audio & video
 │   └── my-playlist/         # one folder per playlist
 │       ├── _manifest.json   # download cache & track file mapping
+│       ├── my-playlist.m3u8 # auto-generated playlist file
 │       └── 01 - Song.opus   # downloaded track
 └── logs/                    # operation logs
     └── my-playlist.log      # operation history & change log
@@ -113,11 +115,11 @@ youtube-playlist-manager/
 | `link` | `python main.py link <id_or_url>` | Registers a playlist by URL or ID and creates its playlist file and download folder. |
 | `unlink` | `python main.py unlink <name>` | Removes a linked playlist. |
 | `list` | `python main.py list` | Lists linked playlists with their last command and timestamp. |
-| `pull` | `python main.py pull [<name>]` | Fetches the live track order into `playlists/<name>.txt`. |
+| `pull` | `python main.py pull [<name>] [--sections] [--pull-mode all\|main_only\|sections_only]` | Fetches the live track order into `playlists/<name>.txt`. Use `--sections` to pull linked section playlists. |
 | `push` | `python main.py push [<name>]` | Syncs local edits (reorders, additions, deletions) back to YouTube *(needs Google Cloud)*. |
-| `format` | `python main.py format [<name>]` | Normalizes raw URLs/IDs in the playlist file and syncs local downloaded track numbering. |
+| `format` | `python main.py format [<name>] [--dedup]` | Normalizes raw URLs/IDs, purges duplicate tracks (`--dedup`), and syncs local downloaded track numbering and `.m3u8` playlists. |
 | `ai-format` | `python main.py ai-format [<name>] [-p <prompt>]` | Reorganizes tracks and creates logical sections (genre, mood, artist) with AI *(alias: `ai-organize`)*. |
-| `download` | `python main.py download [<name>] [--format audio\|video]` | Downloads the playlist as audio or video via `yt-dlp` with incremental caching. |
+| `download` | `python main.py download [<name>] [--format audio\|video]` | Downloads the playlist as audio or video via `yt-dlp` with incremental caching and `.m3u8` generation. |
 | `config` | `python main.py config [<key>] [<val>] [-p <playlist>]` | View or modify global and playlist settings directly from the terminal *(aliases: `settings`, `set`)*. |
 | `help` | `python main.py help` | Shows all commands, options, and usage. |
 
@@ -173,6 +175,7 @@ python main.py download
 - **Incremental** - only tracks not already on disk are downloaded; re-running is always safe and fast.
 - **Self-healing** - delete a file and re-run `download`; ypm notices it's missing and grabs it again.
 - **Numbered files** - with `number_files = true` in `playlist-settings.toml`, files are prefixed by playlist position (`01 - Song.opus`) so they sort correctly in file managers and media players.
+- **.m3u8 playlists** - with `generate_m3u8 = true` (default), standard UTF-8 `.m3u8` playlist files with relative paths are automatically generated and kept up-to-date for the main playlist and all sections, ready to play in VLC, Foobar2000, or mobile players.
 - **Failed tracks** - tracks that are deleted, age-restricted, or copyright-blocked are recorded and skipped on subsequent runs. Set `retry_failed_downloads` in `settings.toml` or use `--retry-failed` to re-attempt them. Use `--clear-failed` to reset the failed cache.
 
 ### Bypassing YouTube Bot Detection & Cookies
@@ -252,52 +255,55 @@ These settings apply across all playlists.
 
 ### Playlist settings - `playlist-settings.toml`
 
-Every playlist can have its own settings block. The bracketed header is the playlist's **alias** - the name shown in the interactive menu (usually the playlist title or the name you gave it when linking).
+These settings apply to individual playlists under their alias header (e.g. `["My Playlist"]`). You can edit `playlist-settings.toml` directly or configure any key using `python main.py config <key> <val> -p <playlist>`.
 
-```toml
-["My Playlist"]
-download-format = "audio"
-embed_thumbnail = true
-number_files = true
-push_mode = "all"
-download_mode = "main_only"
-playlist_entry_format = "%(id)s | %(title)s"
-download_path = ""
-folder_name_source = "alias"
-atomic_writes = true
-number_section_folders = false
-oauth_client = ""
-include_playlist_name_in_sections = false
-```
-
-#### All keys
-
-| Key | Values | Description |
+| Key | Default | Description |
 | --- | --- | --- |
-| `download-format` | `"audio"` \| `"video"` | Whether `download` fetches audio only (`.opus`) or video (`.mp4`). |
-| `embed_thumbnail` | `true` \| `false` | Embed album art into the audio file (requires `ffmpeg`). |
-| `number_files` | `true` \| `false` | Prefix filenames with their playlist position (`01 - Song.opus`). |
-| `push_mode` | `"all"` \| `"main_only"` \| `"sections_only"` | Which playlists are synced on `push`: `"all"` = main playlist and sections, `"main_only"` = main playlist only, `"sections_only"` = section sub-playlists only. |
-| `download_mode` | `"all"` \| `"main_only"` \| `"sections_only"` | Download layout - see [`download_mode` explained](#download_mode-explained). |
-| `playlist_entry_format` | format string | How each track line is written in the playlist file. Supported fields: `%(id)s`, `%(title)s`, `%(channel)s`, `%(duration)s`. Shorthand like `"id, title"` also works. Run `pull` after changing this. |
-| `download_path` | path string | Custom absolute path for downloads. Leave blank to use `<downloads_dir>/<playlist name>`. |
-| `folder_name_source` | `"alias"` \| `"header"` | Which name to use for the download folder when `download_path` is blank: `"alias"` = playlist key, `"header"` = title from the `##` header in the playlist file. |
-| `atomic_writes` | `true` \| `false` | Write playlist files atomically (safe, default). `false` is slightly faster but can corrupt the file if interrupted. |
-| `number_section_folders` | `true` \| `false` | Prefix section download folders with their order (`01 - Chill`, `02 - Hype`). |
-| `oauth_client` | `"project-a"` \| `""` | OAuth client to use automatically - see [Using `oauth_client`](#using-oauth_client). |
-| `account` | `"user@gmail.com"` \| `""` | Google account email to authenticate as. Keys the cached token in `data/tokens/` so multiple accounts can each have their own token without overwriting each other. Leave blank to pick an account in the browser each time. |
-| `cookies_file` | path string | Custom cookie file path for this playlist. |
-| `cookies_from_browser` | browser string | Custom browser for this playlist (e.g. `"firefox"`). |
-| `ai_prompt` | prompt string | Custom instructions to automatically use for `ai-format` on this playlist without prompting. |
-| `include_playlist_name_in_sections` | `true` \| `false` | When `format` fills in a section header, also append the section playlist's real YouTube title: `## <url> \| <your name> \| <real title>`. |
+| `download-format` | `"audio"` | Whether `download` fetches audio only (`.opus`) or video (`.mp4`). |
+| `embed_thumbnail` | `true` | Embed album art into the audio file (requires `ffmpeg`). |
+| `number_files` | `true` | Prefix filenames with their playlist position (`01 - Song.opus`). |
+| `push_mode` | `"all"` | Which playlists are synced on `push`: `"all"`, `"main_only"`, or `"sections_only"`. |
+| `pull_mode` | `"main_only"` | Which playlists are synced on `pull`: `"main_only"`, `"all"`, or `"sections_only"` - see [`pull_mode` explained](#pull_mode-explained). |
+| `download_mode` | `"main_only"` | Download layout: `"main_only"`, `"all"`, or `"sections_only"` - see [`download_mode` explained](#download_mode-explained). |
+| `generate_m3u8` | `true` | Automatically generate and update portable UTF-8 `.m3u8` playlist files with relative paths for sections and main playlist when downloading or formatting. |
+| `m3u8_mode` | `"all"` | Which `.m3u8` playlists to create: `"all"` (main + section playlists, default), `"main_only"`, or `"sections_only"` - see [`m3u8_mode` explained](#m3u8_mode-explained). |
+| `allow_duplicates` | `true` | When `false`, `format` purges duplicate video IDs, keeping the first occurrence. (Can also force via `format --dedup`). |
+| `playlist_entry_format` | `"%(id)s \| %(title)s"` | How each track line is written in the playlist file. Supported fields: `%(id)s`, `%(title)s`, `%(channel)s`, `%(duration)s`. Shorthand like `"id, title"` also works. Run `pull` after changing this. |
+| `download_path` | `""` | Custom absolute path for downloads. Leave blank to use `<downloads_dir>/<playlist name>`. |
+| `folder_name_source` | `"alias"` | Which name to use for the download folder when `download_path` is blank: `"alias"` = playlist key, `"header"` = title from the `##` header in the playlist file. |
+| `atomic_writes` | `true` | Write playlist files atomically (safe, default). `false` is slightly faster but can corrupt the file if interrupted. |
+| `number_section_folders` | `false` | Prefix section download folders with their order (`01 - Chill`, `02 - Hype`). |
+| `oauth_client` | `""` | OAuth client to use automatically - see [Using `oauth_client`](#using-oauth_client). |
+| `account` | `""` | Google account email to authenticate as. Keys the cached token in `data/tokens/` so multiple accounts can each have their own token without overwriting each other. Leave blank to pick an account in the browser each time. |
+| `cookies_file` | `""` | Custom cookie file path override for this playlist (blank = use global). |
+| `cookies_from_browser` | `""` | Custom browser override for this playlist (e.g. `"firefox"`, blank = use global). |
+| `ai_prompt` | `""` | Custom instructions to automatically use for `ai-format` on this playlist without prompting. |
+| `include_playlist_name_in_sections` | `false` | When `format` fills in a section header, also append the section playlist's real YouTube title: `## <url> \| <your name> \| <real title>`. |
+| `ytdlp_player_client` | `""` | Player client override for yt-dlp (e.g. `"web"`, `"android"`, `"ios"`, blank = use global). |
+
+#### `pull_mode` explained
+
+| Mode | Behavior |
+| --- | --- |
+| `"main_only"` | Fetches only the main playlist from YouTube (default). Local section organization is preserved. |
+| `"all"` | Fetches the main playlist, then fetches all linked section playlists. Any new tracks found online in a section are synced into that section locally (and cleared from unorganized). |
+| `"sections_only"` | Fetches only the linked section playlists from YouTube, leaving the main playlist order untouched. |
+
+#### `m3u8_mode` explained
+
+| Mode | Behavior |
+| --- | --- |
+| `"all"` | Generates the full playlist `.m3u8` file **plus** numbered `.m3u8` playlists for every section defined in the `.txt` file (`01 - Section.m3u8`), all referencing the existing media files with zero duplicate downloads (default). |
+| `"main_only"` | Generates only the full playlist `.m3u8` file. |
+| `"sections_only"` | Generates only the individual section `.m3u8` playlist files. |
 
 #### `download_mode` explained
 
 | Mode | Behavior |
 | --- | --- |
-| `"all"` | Downloads both the main folder and each section sub-folder. Tracks exist in both places. |
-| `"main_only"` | Downloads everything into a single flat folder. Good for playlists without sections. |
-| `"sections_only"` | Only downloads section sub-folders (defined by `##` section headers in the playlist file). The top-level folder is skipped. |
+| `"all"` | Downloads both the complete playlist (`<Name> (Full)/`) and each section subfolder. Tracks exist in both places. |
+| `"main_only"` | Downloads all tracks into a dedicated `<Name> (Full)/` subfolder inside the playlist folder. Keeps the root directory clean with subfolders only so switching to sections or all later never causes clutter or requires manual cleanup. |
+| `"sections_only"` | Only downloads section sub-folders (defined by `##` section headers in the playlist file). The full playlist subfolder is skipped. |
 
 #### Using `oauth_client` and `account`
 
